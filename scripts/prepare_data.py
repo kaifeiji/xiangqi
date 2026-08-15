@@ -362,12 +362,10 @@ def export_dataset(
         if not buffer["positions"]:
             return
         shard = shard_numbers[split]
-        np.savez_compressed(
-            dataset_dir / f"{split}-{shard:03d}.npz",
-            positions=np.asarray(buffer["positions"], dtype=np.float32),
-            start_indices=np.asarray(buffer["start_indices"], dtype=np.int64),
-            end_indices=np.asarray(buffer["end_indices"], dtype=np.int64),
-        )
+        shard_prefix = dataset_dir / f"{split}-{shard:03d}"
+        np.save(f"{shard_prefix}-positions.npy", np.asarray(buffer["positions"], dtype=np.float32))
+        np.save(f"{shard_prefix}-start_indices.npy", np.asarray(buffer["start_indices"], dtype=np.int64))
+        np.save(f"{shard_prefix}-end_indices.npy", np.asarray(buffer["end_indices"], dtype=np.int64))
         metadata_path = dataset_dir / f"{split}-{shard:03d}.jsonl"
         metadata_path.write_text(
             "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in buffer["metadata"]),
@@ -443,10 +441,56 @@ def export_dataset(
         "counts": dict(counts),
         "split_rule": "sha256(FEN + moves + Result) modulo 100: 80/10/10",
         "legal_move_validation": "trusted source; not rechecked",
-        "format": "npz + jsonl metadata",
+        "format": "memory-mappable npy shards + jsonl metadata",
     }
     write_json(output_dir / "dataset_summary.json", manifest)
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
+    return 0
+
+
+def convert_npz_dataset(dataset_dir: Path, overwrite: bool) -> int:
+    shard_paths = sorted(
+        path
+        for split in ("train", "validation", "test")
+        for path in dataset_dir.glob(f"{split}-*.npz")
+    )
+    if not shard_paths:
+        raise FileNotFoundError(f"no NPZ shards found under {dataset_dir}")
+    converted_samples = 0
+    for shard_path in shard_paths:
+        prefix = shard_path.with_suffix("")
+        outputs = {
+            "positions": Path(f"{prefix}-positions.npy"),
+            "start_indices": Path(f"{prefix}-start_indices.npy"),
+            "end_indices": Path(f"{prefix}-end_indices.npy"),
+        }
+        existing = [path for path in outputs.values() if path.exists()]
+        if existing and not overwrite:
+            raise FileExistsError(
+                f"NPY output already exists for {shard_path}; rerun with --overwrite to replace it"
+            )
+        with np.load(shard_path) as data:
+            positions = data["positions"]
+            starts = data["start_indices"]
+            ends = data["end_indices"]
+            if len(positions) != len(starts) or len(positions) != len(ends):
+                raise ValueError(f"array lengths do not match in {shard_path}")
+            for name, array in (("positions", positions), ("start_indices", starts), ("end_indices", ends)):
+                output = outputs[name]
+                temporary = output.with_name(f".{output.name}.tmp")
+                with temporary.open("wb") as stream:
+                    np.save(stream, array)
+                temporary.replace(output)
+            converted_samples += len(positions)
+        if converted_samples and converted_samples % 100_000 < len(positions):
+            print(f"converted {converted_samples} samples", flush=True)
+    summary_path = dataset_dir.parent / "dataset_summary.json"
+    if summary_path.exists():
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["format"] = "memory-mappable npy shards + jsonl metadata"
+        summary["converted_from"] = "npz"
+        write_json(summary_path, summary)
+    print(json.dumps({"converted_shards": len(shard_paths), "converted_samples": converted_samples}))
     return 0
 
 
@@ -457,6 +501,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scan-only", action="store_true")
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--export", action="store_true")
+    parser.add_argument("--convert-npz", type=Path, metavar="DATASET_DIR")
+    parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--max-games", type=int)
     parser.add_argument("--shard-size", type=int, default=4096)
     return parser.parse_args()
@@ -464,9 +510,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if not args.scan_only and not args.validate and not args.export:
-        print("choose one of --scan-only, --validate, or --export")
+    modes = (args.scan_only, args.validate, args.export, args.convert_npz is not None)
+    if sum(modes) != 1:
+        print("choose exactly one of --scan-only, --validate, --export, or --convert-npz")
         return 2
+    if args.convert_npz is not None:
+        return convert_npz_dataset(args.convert_npz, args.overwrite)
     if args.scan_only:
         summary = scan_paths(args.input)
         write_json(args.output_dir / "data_scan.json", summary)

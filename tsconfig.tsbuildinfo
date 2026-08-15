@@ -1,0 +1,1 @@
+{"root":["./src/frontend/api.ts","./src/frontend/app.tsx","./src/frontend/game-panel.tsx","./src/frontend/game-utils.ts","./src/frontend/game-view.tsx","./src/frontend/main.tsx","./src/frontend/replay-panel.tsx","./src/frontend/replay-view.tsx","./src/frontend/types.ts","./src/frontend/vite-env.d.ts","./src/frontend/xiangqi-board.tsx"],"version":"5.9.3"}

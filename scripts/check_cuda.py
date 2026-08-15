@@ -26,8 +26,8 @@ def main() -> int:
     print(f"compute capability: {properties.major}.{properties.minor}")
     print(f"VRAM: {properties.total_memory / 1024**3:.2f} GiB")
 
-    left = torch.randn((16, 14, 10, 9), device=device)
-    right = torch.randn((16, 14, 10, 9), device=device)
+    left = torch.randn((16, 15, 10, 9), device=device)
+    right = torch.randn((16, 15, 10, 9), device=device)
     result = left @ right.transpose(-1, -2)
     torch.cuda.synchronize()
     print(f"GPU tensor check: {tuple(result.shape)}")

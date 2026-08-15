@@ -4,17 +4,25 @@ version = "0.1.0"
 description = "Chinese chess move prediction training project"
 requires-python = ">=3.11,<3.13"
 dependencies = [
+    "flask>=3.0,<4",
     "numpy>=2.0,<3",
     "torch==2.6.0",
 ]
 
+[project.scripts]
+xiangqi-play = "backend.app:main"
+
 [tool.uv]
 default-groups = ["dev"]
+package = true
 
 [dependency-groups]
 dev = [
     "pytest>=8.0,<9",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu124" }

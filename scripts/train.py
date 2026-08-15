@@ -5,7 +5,9 @@ import json
 import random
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 import numpy as np
 import torch
@@ -13,77 +15,143 @@ from torch import nn
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
-from xiangqi.models import TinyResNet
-from xiangqi.inference import complete_move_topk
+from backend.models import TinyResNet
+from backend.inference import complete_move_topk
+
+
+@dataclass(frozen=True)
+class ShardPaths:
+    positions: Path
+    start_indices: Path | None = None
+    end_indices: Path | None = None
+
+    @property
+    def is_memory_mappable(self) -> bool:
+        return self.start_indices is not None and self.end_indices is not None
+
+
+def find_shards(data_dir: Path, split: str) -> list[ShardPaths]:
+    position_paths = sorted(data_dir.glob(f"{split}-*-positions.npy"))
+    if position_paths:
+        shards = []
+        for positions in position_paths:
+            prefix = positions.name.removesuffix("-positions.npy")
+            starts = positions.with_name(f"{prefix}-start_indices.npy")
+            ends = positions.with_name(f"{prefix}-end_indices.npy")
+            if not starts.exists() or not ends.exists():
+                raise FileNotFoundError(f"missing label arrays for {positions}")
+            shards.append(ShardPaths(positions, starts, ends))
+        return shards
+    return [ShardPaths(path) for path in sorted(data_dir.glob(f"{split}-*.npz"))]
 
 
 class ShardDataset(IterableDataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
-    def __init__(self, paths: list[Path], index_cache: Path | None = None) -> None:
-        self.paths = paths
+    def __init__(self, shards: list[ShardPaths], batch_size: int, worker_count: int = 1) -> None:
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        if worker_count < 1:
+            raise ValueError("worker_count must be positive")
+        self.shards = shards
+        self.batch_size = batch_size
+        self.worker_count = worker_count
         self.sizes: list[int] = []
         self.training = False
-        self.index_cache = index_cache
-        cached = self._read_index_cache()
-        changed = False
-        for path in paths:
-            key = str(path.resolve())
-            signature = self._signature(path)
-            size = cached.get(key, {}).get("size")
-            if cached.get(key, {}).get("signature") != signature or size is None:
-                with np.load(path) as data:
+        for shard in shards:
+            if shard.is_memory_mappable:
+                assert shard.start_indices is not None
+                size = len(np.load(shard.positions, mmap_mode="r"))
+                if len(np.load(shard.start_indices, mmap_mode="r")) != size:
+                    raise ValueError(f"label length does not match positions in {shard.positions}")
+            else:
+                with np.load(shard.positions) as data:
                     size = len(data["positions"])
-                cached[key] = {"signature": signature, "size": size}
-                changed = True
-            self.sizes.append(int(size))
-        if changed:
-            self._write_index_cache(cached)
-
-    @staticmethod
-    def _signature(path: Path) -> str:
-        stat = path.stat()
-        return f"{stat.st_size}:{stat.st_mtime_ns}"
-
-    def _read_index_cache(self) -> dict[str, dict[str, int | str]]:
-        if self.index_cache is None or not self.index_cache.exists():
-            return {}
-        try:
-            value = json.loads(self.index_cache.read_text(encoding="utf-8"))
-            return value if isinstance(value, dict) else {}
-        except (OSError, json.JSONDecodeError):
-            return {}
-
-    def _write_index_cache(self, value: dict[str, dict[str, int | str]]) -> None:
-        if self.index_cache is None:
-            return
-        self.index_cache.parent.mkdir(parents=True, exist_ok=True)
-        self.index_cache.write_text(json.dumps(value), encoding="utf-8")
+            self.sizes.append(size)
 
     def __len__(self) -> int:
+        return sum(
+            (
+                sum(self.sizes[worker_id::self.worker_count])
+                + self.batch_size
+                - 1
+            )
+            // self.batch_size
+            for worker_id in range(self.worker_count)
+        )
+
+    def sample_count(self) -> int:
         return sum(self.sizes)
 
-    def __iter__(self):
+    @staticmethod
+    def _load_shard(shard: ShardPaths) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if shard.is_memory_mappable:
+            assert shard.start_indices is not None
+            assert shard.end_indices is not None
+            return (
+                np.load(shard.positions, mmap_mode="r"),
+                np.load(shard.start_indices, mmap_mode="r"),
+                np.load(shard.end_indices, mmap_mode="r"),
+            )
+        with np.load(shard.positions) as data:
+            return (
+                data["positions"].copy(),
+                data["start_indices"].copy(),
+                data["end_indices"].copy(),
+            )
+
+    def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         worker = get_worker_info()
         worker_id = worker.id if worker else 0
         worker_count = worker.num_workers if worker else 1
-        paths = self.paths[worker_id::worker_count]
+        shards = self.shards[worker_id::worker_count]
         rng = np.random.default_rng(torch.initial_seed() + worker_id)
+        pending: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
         if self.training:
-            paths = list(paths)
-            rng.shuffle(paths)
-        for path in paths:
-            with np.load(path) as data:
-                positions = data["positions"].copy()
-                starts = data["start_indices"].copy()
-                ends = data["end_indices"].copy()
+            shards = list(shards)
+            rng.shuffle(shards)
+        for shard in shards:
+            positions, starts, ends = self._load_shard(shard)
             indices = np.arange(len(positions))
             if self.training:
                 rng.shuffle(indices)
-            for index in indices:
-                yield (
-                    torch.from_numpy(positions[index]),
-                    torch.tensor(starts[index], dtype=torch.long),
-                    torch.tensor(ends[index], dtype=torch.long),
+            offset = 0
+            if pending is not None:
+                required = self.batch_size - len(pending[0])
+                batch_indices = indices[:required]
+                current = (
+                    np.asarray(positions[batch_indices]),
+                    np.asarray(starts[batch_indices]),
+                    np.asarray(ends[batch_indices]),
                 )
+                if len(current[0]) == required:
+                    yield tuple(
+                        torch.from_numpy(np.concatenate((previous, addition)))
+                        for previous, addition in zip(pending, current)
+                    )
+                    pending = None
+                    offset = required
+                else:
+                    pending = tuple(
+                        np.concatenate((previous, addition))
+                        for previous, addition in zip(pending, current)
+                    )
+                    continue
+            while offset + self.batch_size <= len(indices):
+                batch_indices = indices[offset : offset + self.batch_size]
+                yield (
+                    torch.from_numpy(np.asarray(positions[batch_indices])),
+                    torch.from_numpy(np.asarray(starts[batch_indices])),
+                    torch.from_numpy(np.asarray(ends[batch_indices])),
+                )
+                offset += self.batch_size
+            if offset < len(indices):
+                batch_indices = indices[offset:]
+                pending = (
+                    np.asarray(positions[batch_indices]),
+                    np.asarray(starts[batch_indices]),
+                    np.asarray(ends[batch_indices]),
+                )
+        if pending is not None:
+            yield tuple(torch.from_numpy(values) for values in pending)
 
     def set_training(self, training: bool) -> None:
         self.training = training
@@ -95,6 +163,11 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def append_metrics(path: Path, metrics: dict[str, object]) -> None:
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(metrics, ensure_ascii=False) + "\n")
 
 
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, limit: int | None) -> dict[str, float]:
@@ -155,26 +228,26 @@ def main() -> int:
 
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    train_paths = sorted(args.data_dir.glob("train-*.npz"))
-    validation_paths = sorted(args.data_dir.glob("validation-*.npz"))
-    test_paths = sorted(args.data_dir.glob("test-*.npz"))
-    if not train_paths or not validation_paths or not test_paths:
-        raise FileNotFoundError(f"train/validation/test NPZ shards not found under {args.data_dir}")
+    train_shards = find_shards(args.data_dir, "train")
+    validation_shards = find_shards(args.data_dir, "validation")
+    test_shards = find_shards(args.data_dir, "test")
+    if not train_shards or not validation_shards or not test_shards:
+        raise FileNotFoundError(f"train/validation/test shards not found under {args.data_dir}")
 
-    index_cache = args.data_dir / ".shard_index.json"
-    train_dataset = ShardDataset(train_paths, index_cache)
-    validation_dataset = ShardDataset(validation_paths, index_cache)
+    worker_count = max(args.num_workers, 1)
+    train_dataset = ShardDataset(train_shards, args.batch_size, worker_count)
+    validation_dataset = ShardDataset(validation_shards, args.batch_size, worker_count)
     train_dataset.set_training(True)
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
+        batch_size=None,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
         persistent_workers=args.num_workers > 0,
     )
     validation_loader = DataLoader(
         validation_dataset,
-        batch_size=args.batch_size,
+        batch_size=None,
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
@@ -212,8 +285,8 @@ def main() -> int:
 
     print(json.dumps({
         "device": str(device),
-        "train_samples": len(train_dataset),
-        "validation_samples": len(validation_dataset),
+        "train_samples": train_dataset.sample_count(),
+        "validation_samples": validation_dataset.sample_count(),
         "batch_size": args.batch_size,
         "accumulation_steps": args.accumulation_steps,
         "parameters": sum(parameter.numel() for parameter in model.parameters()),
@@ -224,6 +297,8 @@ def main() -> int:
         optimizer.zero_grad(set_to_none=True)
         epoch_started = time.perf_counter()
         epoch_batches = len(train_loader)
+        training_loss_total = 0.0
+        training_samples = 0
         for batch_index, (positions, starts, ends) in enumerate(train_loader):
             positions = positions.to(device, non_blocking=True)
             starts = starts.to(device, non_blocking=True)
@@ -233,7 +308,10 @@ def main() -> int:
                 starts = (starts // positions.shape[3]) * positions.shape[3] + (positions.shape[3] - 1 - starts % positions.shape[3])
                 ends = (ends // positions.shape[3]) * positions.shape[3] + (positions.shape[3] - 1 - ends % positions.shape[3])
             start_logits, end_logits = model(positions)
-            loss = (criterion(start_logits, starts) + criterion(end_logits, ends)) / args.accumulation_steps
+            batch_loss = criterion(start_logits, starts) + criterion(end_logits, ends)
+            training_loss_total += batch_loss.item() * len(positions)
+            training_samples += len(positions)
+            loss = batch_loss / args.accumulation_steps
             loss.backward()
             should_update = (batch_index + 1) % args.accumulation_steps == 0 or batch_index + 1 == len(train_loader)
             if should_update:
@@ -284,13 +362,32 @@ def main() -> int:
         torch.save(checkpoint, args.checkpoint_dir / "last.pt")
         if improved:
             torch.save(checkpoint, args.checkpoint_dir / "best.pt")
+        append_metrics(
+            args.checkpoint_dir / "metrics.jsonl",
+            {
+                "epoch": epoch + 1,
+                "global_step": global_step,
+                "training_loss": training_loss_total / max(training_samples, 1),
+                "validation": validation_metrics,
+                "learning_rate": optimizer.param_groups[0]["lr"],
+                "epoch_seconds": time.perf_counter() - epoch_started,
+            },
+        )
         print(json.dumps({"epoch": epoch + 1, "validation": validation_metrics, "step": global_step}, ensure_ascii=False), flush=True)
         if epochs_without_improvement >= args.patience:
             print(f"early stopping after {args.patience} epochs without improvement", flush=True)
             break
         if args.max_steps is not None and global_step >= args.max_steps:
             break
-    test_metrics = evaluate(model, DataLoader(ShardDataset(test_paths, index_cache), batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda", persistent_workers=args.num_workers > 0), device, limit=50 if args.max_steps else None)
+    test_dataset = ShardDataset(test_shards, args.batch_size, worker_count)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=None,
+        num_workers=args.num_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=args.num_workers > 0,
+    )
+    test_metrics = evaluate(model, test_loader, device, limit=50 if args.max_steps else None)
     print(json.dumps({"test": test_metrics}, ensure_ascii=False), flush=True)
     return 0
 

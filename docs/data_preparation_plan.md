@@ -12,7 +12,7 @@
   -> 15 通道棋盘编码
   -> 起点/终点标签编码
   -> 按棋局划分 train/validation/test
-  -> .npz 数据集
+  -> 可内存映射的 .npy 数据集
 ```
 
 训练循环禁止解析 PGN、ICCS 或 FEN 字符串。
@@ -70,7 +70,7 @@ encode_fen(fen)
 apply_move(position, start_index, end_index)
 ```
 
-训练前门禁：先用 `docs/iccs.sample` 完成小样本端到端流程 `解析 -> 编码 -> 标签转换 -> NPZ -> Dataset -> 模型前向`；该流程未通过前，不得开始全量导出或训练。无需等待完整棋规验证。
+训练前门禁：先用 `docs/iccs.sample` 完成小样本端到端流程 `解析 -> 编码 -> 标签转换 -> NPY -> Dataset -> 模型前向`；该流程未通过前，不得开始全量导出或训练。无需等待完整棋规验证。
 
 坐标约定固定为：ICCS 列 `A-I` 映射到 `0-8`，ICCS 行 `0-9` 映射到棋盘行 `0-9`；FEN 从黑方一侧开始，因此 `fen_row = 9 - iccs_row`。棋盘张量统一使用 ICCS 行顺序，不能在不同模块重复翻转。用 `docs/iccs.sample` 的前 10 步进行人工核对，并验证包含跨行 `[Red]` 标签的整局可以正常解析；执行整局后还要核对棋盘、轮次和结果状态一致。未闭合引号或无法判定标签边界时，该局进入错误报告，不得静默拼接。
 
@@ -133,15 +133,15 @@ dtype: float32
 14:   当前行棋方（红方为1，黑方为0）
 ```
 
-起点和终点标签均为 `int64`，范围 `0~89`。每条样本还要保留 `game_id`、`ply`、当前行棋方、结果和阶段索引，至少在旁路元数据中可追溯。输出建议使用分片 `.npz`，避免一次性构造过大的单个数组；分片只允许在棋局结束后刷新，即使超过 `shard_size` 也不能把同一 `game_id` 拆到多个分片：
+起点和终点标签均为 `int64`，范围 `0~89`。每条样本还要保留 `game_id`、`ply`、当前行棋方、结果和阶段索引，至少在旁路元数据中可追溯。输出使用三个未压缩 `.npy` 数组组成一个分片，避免一次性构造过大的单个数组，并允许训练进程使用内存映射读取；分片只允许在棋局结束后刷新，即使超过 `shard_size` 也不能把同一 `game_id` 拆到多个分片：
 
 ```text
-artifacts/dataset/train-000.npz
-artifacts/dataset/validation-000.npz
-artifacts/dataset/test-000.npz
+artifacts/dataset/train-000-positions.npy
+artifacts/dataset/train-000-start_indices.npy
+artifacts/dataset/train-000-end_indices.npy
 ```
 
-每个分片至少包含：
+每组三个数组包含：
 
 ```text
 positions: float32  [N, 15, 10, 9]
@@ -199,9 +199,9 @@ artifacts/validated_games.jsonl
 artifacts/data_errors.jsonl
 artifacts/validation_summary.json
 artifacts/split_manifest.json
-artifacts/dataset/train-*.npz
-artifacts/dataset/validation-*.npz
-artifacts/dataset/test-*.npz
+artifacts/dataset/train-*-positions.npy
+artifacts/dataset/train-*-start_indices.npy
+artifacts/dataset/train-*-end_indices.npy
 artifacts/dataset_summary.json
 ```
 
