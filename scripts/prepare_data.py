@@ -340,6 +340,17 @@ def game_split(game: ParsedGame) -> str:
     return "test"
 
 
+def position_value(result: str, position: np.ndarray) -> float:
+    normalized = result.strip()
+    if normalized == "1/2-1/2":
+        return 0.0
+    if normalized not in {"1-0", "0-1"}:
+        raise ValueError(f"unsupported game result for value label: {result!r}")
+    red_to_move = bool(position[14, 0, 0])
+    red_won = normalized == "1-0"
+    return 1.0 if red_to_move == red_won else -1.0
+
+
 def export_dataset(
     paths: Iterable[Path],
     output_dir: Path,
@@ -349,7 +360,7 @@ def export_dataset(
     dataset_dir = output_dir / "dataset"
     dataset_dir.mkdir(parents=True, exist_ok=True)
     buffers: dict[str, dict[str, list[object]]] = {
-        split: {"positions": [], "start_indices": [], "end_indices": [], "metadata": []}
+        split: {"positions": [], "start_indices": [], "end_indices": [], "values": [], "metadata": []}
         for split in ("train", "validation", "test")
     }
     shard_numbers = {split: 0 for split in buffers}
@@ -366,6 +377,7 @@ def export_dataset(
         np.save(f"{shard_prefix}-positions.npy", np.asarray(buffer["positions"], dtype=np.float32))
         np.save(f"{shard_prefix}-start_indices.npy", np.asarray(buffer["start_indices"], dtype=np.int64))
         np.save(f"{shard_prefix}-end_indices.npy", np.asarray(buffer["end_indices"], dtype=np.int64))
+        np.save(f"{shard_prefix}-values.npy", np.asarray(buffer["values"], dtype=np.float32))
         metadata_path = dataset_dir / f"{split}-{shard:03d}.jsonl"
         metadata_path.write_text(
             "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in buffer["metadata"]),
@@ -410,6 +422,7 @@ def export_dataset(
                     buffer["positions"].append(position.copy())
                     buffer["start_indices"].append(start)
                     buffer["end_indices"].append(end)
+                    buffer["values"].append(position_value(game.tags.get("Result", "*"), position))
                     buffer["metadata"].append({
                         "game_number": game.game_number,
                         "source_file": game.source_file,
@@ -441,7 +454,7 @@ def export_dataset(
         "counts": dict(counts),
         "split_rule": "sha256(FEN + moves + Result) modulo 100: 80/10/10",
         "legal_move_validation": "trusted source; not rechecked",
-        "format": "memory-mappable npy shards + jsonl metadata",
+        "format": "memory-mappable npy shards + jsonl metadata + value labels",
     }
     write_json(output_dir / "dataset_summary.json", manifest)
     print(json.dumps(manifest, ensure_ascii=False, indent=2))
@@ -494,6 +507,55 @@ def convert_npz_dataset(dataset_dir: Path, overwrite: bool) -> int:
     return 0
 
 
+def add_value_labels(dataset_dir: Path, overwrite: bool) -> int:
+    position_paths = sorted(
+        path
+        for split in ("train", "validation", "test")
+        for path in dataset_dir.glob(f"{split}-*-positions.npy")
+    )
+    if not position_paths:
+        raise FileNotFoundError(f"no position NPY shards found under {dataset_dir}")
+    converted_samples = 0
+    for positions_path in position_paths:
+        prefix = positions_path.name.removesuffix("-positions.npy")
+        metadata_path = dataset_dir / f"{prefix}.jsonl"
+        output = dataset_dir / f"{prefix}-values.npy"
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"missing metadata for {positions_path}")
+        if output.exists() and not overwrite:
+            raise FileExistsError(f"value labels already exist: {output}; rerun with --overwrite")
+
+        positions = np.load(positions_path, mmap_mode="r")
+        values: list[float] = []
+        with metadata_path.open(encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, start=1):
+                if not line.strip():
+                    continue
+                metadata = json.loads(line)
+                if line_number > len(positions):
+                    raise ValueError(f"metadata has more rows than positions in {metadata_path}")
+                values.append(position_value(str(metadata.get("result", "*")), positions[len(values)]))
+        if len(values) != len(positions):
+            raise ValueError(
+                f"metadata length {len(values)} does not match positions length {len(positions)} in {positions_path}"
+            )
+        temporary = output.with_name(f".{output.name}.tmp")
+        with temporary.open("wb") as stream:
+            np.save(stream, np.asarray(values, dtype=np.float32))
+        temporary.replace(output)
+        converted_samples += len(values)
+        print(f"added values to {positions_path.name}: {len(values)} samples", flush=True)
+
+    summary_path = dataset_dir.parent / "dataset_summary.json"
+    if summary_path.exists():
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["format"] = "memory-mappable npy shards + jsonl metadata + value labels"
+        summary["value_labels"] = "added from existing positions and metadata"
+        write_json(summary_path, summary)
+    print(json.dumps({"value_shards": len(position_paths), "value_samples": converted_samples}))
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scan and structurally validate Xiangqi PGNS files.")
     parser.add_argument("--input", nargs="+", type=Path, default=list(DEFAULT_INPUTS))
@@ -502,6 +564,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--export", action="store_true")
     parser.add_argument("--convert-npz", type=Path, metavar="DATASET_DIR")
+    parser.add_argument("--add-values", type=Path, metavar="DATASET_DIR")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--max-games", type=int)
     parser.add_argument("--shard-size", type=int, default=4096)
@@ -510,12 +573,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    modes = (args.scan_only, args.validate, args.export, args.convert_npz is not None)
+    modes = (args.scan_only, args.validate, args.export, args.convert_npz is not None, args.add_values is not None)
     if sum(modes) != 1:
-        print("choose exactly one of --scan-only, --validate, --export, or --convert-npz")
+        print("choose exactly one of --scan-only, --validate, --export, --convert-npz, or --add-values")
         return 2
     if args.convert_npz is not None:
         return convert_npz_dataset(args.convert_npz, args.overwrite)
+    if args.add_values is not None:
+        return add_value_labels(args.add_values, args.overwrite)
     if args.scan_only:
         summary = scan_paths(args.input)
         write_json(args.output_dir / "data_scan.json", summary)

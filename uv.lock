@@ -16,6 +16,15 @@ wheels = [
 ]
 
 [[package]]
+name = "cchess"
+version = "1.25.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/9b/e2/62ea3f0e5e6affb010dff4d7c7c9bf5380ba16d5a275e3aa166eef083ac6/cchess-1.25.5.tar.gz", hash = "sha256:de4a0de300c0d9da05f25a5096cdc213d682e1b6843d043c03413cc508a7348a", size = 79013, upload-time = "2025-10-13T09:25:02.456Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/77/8d/f88e22fe5a6bf44f6b8d88a01f19966d72afffa063dd6f7c412c06ea99fc/cchess-1.25.5-py3-none-any.whl", hash = "sha256:fa48602cf76d7776f8e4f0568b5f9b8b32a32c5d3a9089c05855d1f49a303171", size = 88164, upload-time = "2025-10-13T09:24:59.962Z" },
+]
+
+[[package]]
 name = "click"
 version = "8.4.2"
 source = { registry = "https://pypi.org/simple" }
@@ -462,6 +471,7 @@ name = "xiangqi"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cchess" },
     { name = "flask" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
@@ -475,6 +485,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cchess", specifier = ">=1.25,<2" },
     { name = "flask", specifier = ">=3.0,<4" },
     { name = "numpy", specifier = ">=2.0,<3" },
     { name = "torch", specifier = "==2.6.0", index = "https://download.pytorch.org/whl/cu124" },

@@ -11,7 +11,7 @@ shape: (batch_size, 15, 10, 9)
 dtype: float32
 ```
 
-第一阶段模型输出为两个未归一化的 logits：
+策略基线模型输出两个未归一化的 logits：
 
 ```text
 start_logits: (batch_size, 90)
@@ -27,6 +27,19 @@ end_logits:   (batch_size, 90)
 ```python
 start_logits, end_logits = model(board_batch)
 loss = start_loss(start_logits, start_targets) + end_loss(end_logits, end_targets)
+```
+
+启用价值头时，模型额外输出当前行棋方视角的价值：
+
+```text
+value: (batch_size,)
+range: [-1, 1]
+```
+
+```python
+start_logits, end_logits, value = model(board_batch)
+policy_loss = start_loss(start_logits, start_targets) + end_loss(end_logits, end_targets)
+loss = policy_loss + 0.5 * mse_loss(value, value_targets)
 ```
 
 ## 2. 训练数据接口
@@ -48,6 +61,14 @@ Dataset 返回训练所需的三个字段：
 ```python
 board, start_index, end_index
 ```
+
+启用价值头时，数据分片额外包含 `values.npy`，Dataset 返回：
+
+```python
+board, start_index, end_index, value
+```
+
+`value` 按当前行棋方计算：己方最终获胜为 `+1`，和棋为 `0`，己方最终失败为 `-1`。已有 memory-mapped 数据可通过 `prepare_data.py --add-values` 添加该数组。
 
 棋谱来源、局号和 ply 保存在元数据中，用于追溯、去重和错误定位，不随每个批次传入 GPU。
 
@@ -108,10 +129,10 @@ score = log_softmax(start_logits)[start]
       + log_softmax(end_logits)[end]
 ```
 
-后续接入 MCTS 时，模型可扩展为第三个价值输出：
+价值头已经可用于监督训练；后续接入 MCTS 时可直接复用第三个价值输出：
 
 ```text
-value: (batch_size, 1)
+value: (batch_size,)
 ```
 
 价值使用当前行棋方视角，胜为 `+1`、和为 `0`、负为 `-1`。扩展后的模型接口为：
@@ -167,7 +188,7 @@ FEN
   -> encode_fen()
     -> (1, 15, 10, 9)
   -> model.forward()
-  -> (start_logits, end_logits)
+    -> (start_logits, end_logits) 或 (start_logits, end_logits, value)
   -> Top-K 起点/终点组合
   -> 合法走法过滤
   -> ICCS 走法，例如 C3-C4

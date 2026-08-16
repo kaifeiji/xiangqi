@@ -69,8 +69,9 @@ h1 {
 .mode-view {
   display: grid;
   grid-template-columns: minmax(0, 540px) minmax(220px, 1fr);
+  grid-template-rows: 600px;
   gap: 28px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .mode-view[hidden] {
@@ -89,6 +90,11 @@ h1 {
   aspect-ratio: 9 / 10;
 }
 
+cg-board {
+  overflow: hidden;
+  border-radius: 6px;
+}
+
 .controls {
   display: grid;
   gap: 14px;
@@ -98,9 +104,113 @@ h1 {
   background: #f6edda;
 }
 
+.side-panels {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  margin: 25px 0;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.move-record {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  border: 1px solid #9b7652;
+  border-radius: 6px;
+  background: #f6edda;
+}
+
+.record-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 14px 10px;
+  border-bottom: 1px solid #d2b48c;
+}
+
+.record-header h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.record-header .status {
+  margin-top: 4px;
+}
+
+.icon-button {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid #7c5a39;
+  border-radius: 4px;
+  background: #fffaf0;
+  color: #7d2e1f;
+  cursor: pointer;
+  font-size: 20px;
+}
+
+.move-record > .error {
+  padding: 0 14px;
+}
+
+.move-list {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 12px 14px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.move-list li {
+  padding: 0;
+  border-left: 3px solid #b98a58;
+  background: #fffaf0;
+  font-variant-numeric: tabular-nums;
+}
+
+.move-list li.active {
+  border-left-color: #2d5a46;
+  background: #f1f8f3;
+}
+
+.move-entry {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.move-entry:disabled {
+  cursor: default;
+}
+
+.move-number {
+  min-width: 2.5ch;
+  color: #7c5a39;
+  text-align: right;
+}
+
 .controls label {
   display: grid;
-  gap: 5px;
+  grid-template-columns: 84px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
   font-size: 15px;
 }
 
@@ -132,6 +242,30 @@ h1 {
   gap: 8px;
 }
 
+.record-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px 0;
+}
+
+.record-controls button {
+  min-height: 34px;
+  min-width: 72px;
+  padding: 6px 10px;
+  border: 1px solid #7c5a39;
+  border-radius: 4px;
+  background: #fffaf0;
+  color: inherit;
+  cursor: pointer;
+}
+
+.record-controls button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .replay-controls button {
   min-width: 72px;
 }
@@ -158,5 +292,12 @@ h1 {
   .game-layout,
   .mode-view {
     grid-template-columns: 1fr;
+    grid-template-rows: auto;
+  }
+
+  .side-panels {
+    height: auto;
+    min-height: 420px;
+    margin: 0;
   }
 }

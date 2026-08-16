@@ -28,6 +28,26 @@ data/raw/WXF-41743games.pgns
 
 典型 ICCS 着法为 `C3-C4`：列为 `A-I`，行号为 `0-9`，起点和终点之间通常有连字符。结果标记如 `1-0` 不作为着法。
 
+### 上游来源和工具
+
+- [CGLemon/chinese-chess-PGN](https://github.com/CGLemon/chinese-chess-PGN)：当前两组 `.pgns` 的来源说明，包含 DPXQ 约 99,813 盘和 WXF 约 41,743 盘的 ICCS 棋谱及格式示例。上游声称已排除包含非法手的棋谱，但本项目仍独立记录结构错误、回放错误和重复局。
+- [weiyinfu/xqp](https://github.com/weiyinfu/xqp)：棋书分类数据来源，对应 `data/raw/chess_book-main/`。其中部分 XQF/排局文件没有后续着法，不能默认转换为策略监督样本。
+- [kuiba1949/cchess](https://github.com/kuiba1949/cchess)：棋书文件读取使用的 Python 包来源，仓库标注 BSD-3-Clause。它用于 `scripts/prepare_chess_book_dataset.py` 的 XQF、CBR、CBL 读取，不替代 `prepare_data.py` 对 ICCS `.pgns` 的项目内解析器。
+
+数据来源仓库与解析工具的版权/再分发条款不等价：`cchess` 的 BSD-3-Clause 许可不自动覆盖两个棋谱数据仓库或其中的原始棋谱。发布数据集、棋谱副本或模型时，必须保留来源记录并单独核实上游条款。
+
+## 棋书分类数据源
+
+独立脚本 `scripts/prepare_chess_book_dataset.py` 不修改本计划中的 `prepare_data.py` 流程，读取 `data/raw/chess_book-main/` 并按三类导出：
+
+- `全局`：`全局`、`比赛对局`、`大师专集`、`近代国手名局`、`让子局`、`未分类`、`实战中局夺子取胜技巧150局`。
+- `布局`：开局和布局专题目录。
+- `残局`：残局、排局和杀局专题目录。
+
+当前直接支持 `XQF`、`CBR`、`CBL`，其中 CBL 展开为多局；`QP`、`SG`、`XQN` 等未接入策略导出。脚本按源文件写入 `parsed_games.checkpoint.jsonl`，可用 `--resume` 断点继续。
+
+QP 已通过 `scripts/reverse_qp.py` 单独逆向：3725 个文件均可解码为 FEN 初始局面，输出 `artifacts/qp_decoded_positions.jsonl`。QP 不包含已确认的解法走法，因此不能直接作为 `(position, start, end)` 策略监督样本；在补充解法或价值标签前，只能作为残局局面集合使用。
+
 ## 阶段一：原始文件扫描
 
 建议入口：`scripts/prepare_data.py --scan-only`

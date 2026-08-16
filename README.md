@@ -2,7 +2,7 @@
 
 本项目面向 4 GB NVIDIA GeForce GTX 1650 Ti 训练象棋走法预测模型。
 - Python 3.11 和 PyTorch 2.x
-- Tiny-ResNet：64 个通道、4 个残差块、约 134 万参数
+- ResNet：策略基线默认 64 个通道、4 个残差块；启用 value head 后约 208 万参数，可通过训练参数调整规模
 - 输入张量形状：`(15, 10, 9)`，包含 14 个棋子类型通道和 1 个轮到行棋方通道
 - 分别预测 90 类起点与 90 类终点
 - 首轮训练使用 FP32
@@ -66,6 +66,19 @@ HMR 使用 Vite 的 WebSocket，因此开发模式使用独立的 `5173` 端口�
 
 ## 数据准备
 
+### 数据来源与解析库
+
+当前训练用的两组 ICCS 棋谱来源于 [CGLemon/chinese-chess-PGN](https://github.com/CGLemon/chinese-chess-PGN) 收集的棋谱仓库：
+
+- `dpxq-99813games.pgns`：东萍象棋棋谱仓库，仓库 README 标注约 99,813 盘。
+- `WXF-41743games.pgns`：世界象棋联合会棋谱，仓库 README 标注约 41,743 盘。
+
+该仓库明确说明两组数据均为 ICCS 格式，并给出了 FEN、`Result`、`Format` 和 `C3-C4` 一类着法示例。本项目仍会执行自己的结构检查、去重、分割和局面编码；上游关于“排除非法手”的说明不替代本项目的错误报告。
+
+棋书分类数据来自 [weiyinfu/xqp](https://github.com/weiyinfu/xqp)，对应 `data/raw/chess_book-main/` 及其 `全局`、`布局`、`残局` 等目录。该仓库包含 XQF 等棋谱和部分没有后续着法的排局，因此本项目将其作为独立的棋书/残局数据流程处理，不与两组 PGN 棋谱混合去重。
+
+解析棋书文件使用 [kuiba1949/cchess](https://github.com/kuiba1949/cchess)。它是中国象棋 PGN 棋谱生成/编辑工具，仓库标注 BSD-3-Clause；项目通过 `cchess` Python 包读取 XQF、CBR、CBL 等文件。它不是 `prepare_data.py` 解析 ICCS `.pgns` 的运行时依赖，后者使用项目内的轻量解析和编码逻辑。上游数据仓库的 README 未提供明确的统一再分发许可证；重新发布原始棋谱或基于其训练出的数据/模型前，应分别核实来源条款。
+
 默认原始棋谱路径：
 
 - `data/raw/dpxq-99813games.pgns`
@@ -101,6 +114,7 @@ uv run python scripts\prepare_data.py --export --output-dir data\processed --sha
 
 - `data/processed/dataset_summary.json`：已处理棋局数、去重和跳过数量、各数据集样本数和分片数、输入文件哈希及 80/10/10 切分规则。
 - `data/processed/dataset/train-*-positions.npy`、`train-*-start_indices.npy`、`train-*-end_indices.npy`：训练分片；验证和测试分片使用同一命名规则。三个数组均为未压缩 NPY，以便训练进程内存映射读取并直接产出完整 batch。全量数据约需 36 GiB 磁盘空间。
+- 启用价值头时，导出分片还包含 `*-values.npy`：以当前行棋方视角编码的最终结果（胜 `+1`、和 `0`、负 `-1`）。
 - 对应的 `*.jsonl`：每个样本的源文件、棋局、回合和结果等元数据。
 
 可用 `--input` 指定一个或多个非默认棋谱文件；`--max-games` 可限制处理棋局数，用于冒烟测试。
@@ -113,18 +127,26 @@ uv run python scripts\prepare_data.py --export --output-dir data\processed --sha
 
 该命令原地新增 NPY 文件并保留 NPZ。若转换中断，删除不完整的 NPY 文件后重跑；只有在确认需要替换已有 NPY 时才添加 `--overwrite`。
 
+为已有的 memory-mapped `processed` 数据添加价值标签，不重新解析 PGN：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\prepare_data.py --add-values data\processed\dataset
+```
+
+该命令读取每个 shard 的 positions NPY 和 JSONL metadata，原地新增 `*-values.npy`，原有 positions、起点和终点数组不变。若目标文件已存在，使用 `--overwrite` 才会重写。
+
 ## 训练
 
 从导出的完整数据集开始训练，checkpoint 输出到 `checkpoints/run-1/`：
 
 ```powershell
-uv run python scripts\train.py --data-dir data\processed\dataset --checkpoint-dir checkpoints\run-1 --batch-size 128 --accumulation-steps 1 --learning-rate 0.001 --epochs 100 --patience 5 --num-workers 8 --mirror
+uv run python scripts\train.py --data-dir data\processed\dataset --checkpoint-dir checkpoints\run-1 --channels 128 --blocks 6 --batch-size 256 --accumulation-steps 1 --learning-rate 0.001 --epochs 100 --patience 5 --num-workers 8 --mirror
 ```
 
 中断后从最近 checkpoint 续跑：
 
 ```powershell
-uv run python scripts\train.py --data-dir data\processed\dataset --checkpoint-dir checkpoints\run-1 --batch-size 128 --accumulation-steps 1 --learning-rate 0.001 --epochs 100 --patience 5 --num-workers 8 --mirror --resume checkpoints\run-1\last.pt
+uv run python scripts\train.py --data-dir data\processed\dataset --checkpoint-dir checkpoints\run-1 --channels 128 --blocks 6 --batch-size 256 --accumulation-steps 1 --learning-rate 0.001 --epochs 100 --patience 5 --num-workers 8 --mirror --resume checkpoints\run-1\last.pt
 ```
 
 训练输出：
@@ -137,13 +159,30 @@ uv run python scripts\train.py --data-dir data\processed\dataset --checkpoint-di
 
 验证 loss 连续 `--patience` 个 epoch 未改善时会提前停止。当前训练和验证均未使用规则合法性掩码；完整走子 top-1、top-5 和 top-10 指标反映的是未掩码预测结果。
 
+从零训练 `64×4` 策略加价值模型：
+
+```powershell
+uv run python scripts\prepare_data.py --export --output-dir data\processed_value --shard-size 4096
+uv run python scripts\train.py --data-dir data\processed_value\dataset --checkpoint-dir checkpoints\resnet-c64-b4-value --channels 64 --blocks 4 --batch-size 16 --accumulation-steps 8 --epochs 100 --patience 5 --value-head
+```
+
+`--value-head` 要求数据分片包含 `*-values.npy`，并从随机初始化开始训练；不会加载已有 `.pt`。价值损失为策略损失之外的 `0.5 × MSE`。
+
+已有 `data\processed` 添加 values 后，也可直接使用较大批次训练：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\train.py --data-dir data\processed\dataset --checkpoint-dir checkpoints\resnet-c64-b4-value --channels 64 --blocks 4 --batch-size 512 --accumulation-steps 1 --epochs 100 --patience 5 --value-head
+```
+
+按当前显存情况可先尝试 `batch-size=512`；若训练中出现显存不足，再降到 256 或使用梯度累积。
+
 ## 脚本说明
 
 | 脚本 | 用途 | 输入与输出 |
 | --- | --- | --- |
 | `scripts/check_cuda.py` | 验证当前 Python 环境能否使用 CUDA，并执行一次 GPU 张量计算。 | 输出 Python、PyTorch、CUDA、显卡和显存信息；失败时返回非零状态码。 |
-| `scripts/prepare_data.py` | 解析 PGNS 棋谱，执行扫描、结构校验或导出训练数据。 | 读取 `data/raw/` 下默认棋谱；导出可内存映射的 NPY 分片。 |
-| `scripts/train.py` | 读取导出的分片，训练并评估 Tiny-ResNet。 | 优先读取 NPY 分片并以完整 batch 传递给训练循环；兼容旧 NPZ。 |
+| `scripts/prepare_data.py` | 解析 PGNS 棋谱，执行扫描、结构校验、导出训练数据，或为已有分片添加价值标签。 | 读取 `data/raw/` 或既有 dataset；导出可内存映射的 NPY 分片。 |
+| `scripts/train.py` | 读取导出的分片，训练并评估 Tiny-ResNet 策略模型或策略加价值模型。 | 优先读取 NPY 分片并以完整 batch 传递给训练循环；兼容旧 NPZ。 |
 | `scripts/data_encoding.py` | 提供 FEN 编码、ICCS 坐标转换和棋局位置更新函数。 | 被数据准备、训练相关代码和自动化测试导入，不单独执行。 |
 
 ## 测试
@@ -153,3 +192,42 @@ uv run python scripts\train.py --data-dir data\processed\dataset --checkpoint-di
 ```powershell
 uv run pytest
 ```
+
+## 棋书分类数据集
+
+`scripts/prepare_chess_book_dataset.py` 是独立于 `prepare_data.py` 的棋书导出脚本。它递归读取 `data/raw/chess_book-main/` 下的三类目录，将 XQF 棋谱转换为按类别分开的训练数据集。`比赛对局`、`大师专集`、`近代国手名局`、`让子局`、`未分类` 和 `实战中局夺子取胜技巧150局` 均归入 `全局`；其中实战中局按中局战术资料处理，不归入布局或残局：
+
+```powershell
+uv sync
+uv run python scripts\prepare_chess_book_dataset.py `
+	--input-dir data\raw\chess_book-main `
+	--output-dir artifacts\chess_book_dataset `
+	--shard-size 4096
+```
+
+处理中断后可使用同样的参数加 `--resume` 继续。脚本会读取每个分类目录下的 `parsed_games.checkpoint.jsonl`，跳过已经完整解析的源文件：
+
+```powershell
+uv run python scripts\prepare_chess_book_dataset.py `
+	--input-dir data\raw\chess_book-main `
+	--output-dir artifacts\chess_book_dataset `
+	--formats xqf `
+	--shard-size 4096 `
+	--resume
+```
+
+输出目录包含三个分类子目录，每个分类都有 `train`、`validation`、`test` 的 JSONL 元数据和 NPY 分片（棋盘、起点、终点、value）。`dataset_summary.json` 记录每类样本数、失败文件和暂不支持的 SG/XQN 等格式。当前脚本支持 XQF、CBR 和 CBL；其中 CBL 会展开为多局。不支持的格式会被记录，不会静默丢弃。
+
+### QP 残局局面
+
+棋书中的 `.qp` 是专有的残局排局二进制格式，共发现 3725 个文件。已通过 `scripts/reverse_qp.py` 解码为初始局面：
+
+```powershell
+uv run python scripts\reverse_qp.py `
+	data\raw\chess_book-main `
+	--limit 3725 `
+	--output artifacts\qp_probe_all_v2.json `
+	--decoded-output artifacts\qp_decoded_positions.jsonl
+```
+
+当前已验证 3725/3725 个文件可以转换为 FEN，结果在 `artifacts/qp_decoded_positions.jsonl`。QP 只包含残局初始棋子布置，没有发现后续解法走法，因此暂时只能作为残局局面或价值模型评估集，不能直接生成策略训练样本。其结构为 `ccf0` 头、棋子数量和 `[棋子编码、列、行]` 三字节记录；已确认棋子编码为零基 0~13。

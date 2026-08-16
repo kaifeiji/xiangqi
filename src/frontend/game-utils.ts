@@ -1,5 +1,31 @@
 import type { Key } from 'xiangqiground/types'
-import type { BoardCell, Side } from './types'
+import type { BoardCell, Game, Side } from './types'
+
+export function resultText(result: string): string {
+  const texts: Record<string, string> = {
+    red_win: '红方胜',
+    black_win: '黑方胜',
+    draw_stalemate: '判负（无合法着法）',
+    draw_repetition: '和棋（三次重复局面）',
+    draw_natural_limit: '和棋（自然限着）',
+    draw_move_limit: '和棋（达到最大回合数）',
+    draw_insufficient_material: '和棋（理论无胜）',
+    black_win_long_check: '黑方胜（红方长将）',
+    red_win_long_check: '红方胜（黑方长将）',
+    black_win_long_chase: '黑方胜（红方长捉）',
+    red_win_long_chase: '红方胜（黑方长捉）',
+  }
+  return texts[result] ?? '对局结束'
+}
+
+export function statusFor(game: Game | undefined, modelsLoaded: boolean, thinking: boolean): string {
+  if (!modelsLoaded) return '加载模型中...'
+  if (!game) return '未开始'
+  if (game.result) return `对局结束：${resultText(game.result)}`
+  if (thinking) return '模型思考中...'
+  const side = game.side_to_move === 'w' ? '红方' : '黑方'
+  return `第 ${game.turn} 回合，轮到${side}${game.in_check ? '（被将军）' : ''}`
+}
 
 export function toKey(square: string): Key {
   const file = square.slice(0, 1).toLowerCase()

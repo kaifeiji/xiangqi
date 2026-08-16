@@ -1,7 +1,6 @@
 import { useEffectEvent, useState } from 'react'
-import type { Key } from 'xiangqiground/types'
 import { changedMove } from './game-utils'
-import { ReplayPanel } from './replay-panel'
+import { MoveRecord } from './move-record'
 import { XiangqiBoard } from './xiangqi-board'
 import type { Game, GameArchive } from './types'
 
@@ -12,7 +11,6 @@ interface ReplayViewProps {
 export function ReplayView({ active }: ReplayViewProps): React.JSX.Element {
   const [snapshots, setSnapshots] = useState<Game[]>([])
   const [position, setPosition] = useState(0)
-  const [lastMove, setLastMove] = useState<Key[]>()
   const [error, setError] = useState('')
 
   const loadArchive = useEffectEvent(async (file: File) => {
@@ -24,33 +22,42 @@ export function ReplayView({ active }: ReplayViewProps): React.JSX.Element {
       setError('')
       setSnapshots(archive.snapshots)
       setPosition(0)
-      setLastMove(undefined)
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : '无法读取存档')
     }
   })
 
-  const step = useEffectEvent((offset: number) => {
-    const nextPosition = position + offset
-    if (nextPosition < 0 || nextPosition >= snapshots.length) return
-    const nextGame = snapshots[nextPosition]
-    const previousGame = snapshots[position]
-    setPosition(nextPosition)
-    setLastMove(changedMove(previousGame.board, nextGame.board, nextGame.side_to_move))
+  const navigateReplay = useEffectEvent((index: number) => {
+    if (index < 0 || index >= snapshots.length) return
+    setPosition(index)
   })
 
   const game = snapshots[position]
+  const previousGame = position > 0 ? snapshots[position - 1] : undefined
+  const lastMove = game && previousGame ? changedMove(previousGame.board, game.board, game.side_to_move) : undefined
 
   return (
     <section className="mode-view" hidden={!active} aria-label="回放">
       <XiangqiBoard active={active} game={game} lastMove={lastMove} readOnly onMove={() => undefined} />
-      <ReplayPanel
-        error={error}
-        position={position}
-        length={snapshots.length}
-        onLoad={loadArchive}
-        onStep={step}
-      />
+      <div className="side-panels">
+        <aside className="controls" aria-label="回放设置">
+          <label>
+            加载存档
+            <input type="file" accept="application/json,.json" onChange={(event) => {
+              const file = event.target.files?.[0]
+              if (file) void loadArchive(file)
+              event.target.value = ''
+            }} />
+          </label>
+        </aside>
+        <MoveRecord
+          snapshots={snapshots}
+          status={snapshots.length ? '回放中' : '请选择存档'}
+          error={error}
+          currentIndex={position}
+          onNavigate={navigateReplay}
+        />
+      </div>
     </section>
   )
 }

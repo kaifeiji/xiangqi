@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,17 +15,23 @@ from flask import Flask, jsonify, redirect, request, send_from_directory
 
 from backend.game.engine import (
     START_FEN,
+    Move,
     Position,
     apply_move,
+    attacking_targets,
     iccs_to_move,
     is_in_check,
+    is_theoretical_draw,
     king_exists,
     legal_moves,
     move_to_iccs,
     parse_fen,
+    resets_natural_limit,
 )
 
 MODEL_SUFFIXES = {".ckpt", ".pt", ".pth"}
+NATURAL_LIMIT_PLIES = 120
+MAX_PLIES = 600
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 MODELS_DIR = PROJECT_DIR / "models"
 WEB_CLIENT_DIR = PROJECT_DIR
@@ -36,14 +43,27 @@ class WebGame:
     game_id: str
     mode: str
     human_side: str | None
+    initial_position: Position
     position: Position
     players: dict[str, Any]
     turn: int = 1
     result: str | None = None
     last_error: str | None = None
+    position_counts: dict[Position, int] = field(default_factory=dict)
+    quiet_plies: int = 0
+    position_history: list[Position] = field(default_factory=list)
+    move_history: list[Move] = field(default_factory=list)
+    checking_sides: list[str | None] = field(default_factory=list)
+    mover_sides: list[str] = field(default_factory=list)
+    chasing_targets: list[set[tuple[int, int, str]]] = field(default_factory=list)
 
 
-def _evaluate_result(position: Position) -> str | None:
+def _evaluate_result(
+    position: Position,
+    position_counts: dict[Position, int] | None = None,
+    quiet_plies: int = 0,
+    total_plies: int = 0,
+) -> str | None:
     if not king_exists(position, "w"):
         return "black_win"
     if not king_exists(position, "b"):
@@ -51,14 +71,68 @@ def _evaluate_result(position: Position) -> str | None:
     side = position.side_to_move
     available = legal_moves(position)
     if not available:
-        if is_in_check(position, side):
-            return "black_win" if side == "w" else "red_win"
-        return "draw_stalemate"
+        # Xiangqi rules: no legal move (including stalemate) is a loss for side to move.
+        return "black_win" if side == "w" else "red_win"
+    if is_theoretical_draw(position):
+        return "draw_insufficient_material"
+    if position_counts is not None and position_counts.get(position, 0) >= 3:
+        return "draw_repetition"
+    if quiet_plies >= NATURAL_LIMIT_PLIES:
+        return "draw_natural_limit"
+    if total_plies >= MAX_PLIES:
+        return "draw_move_limit"
+    return None
+
+
+def _record_position(game: WebGame) -> None:
+    game.position_counts[game.position] = game.position_counts.get(game.position, 0) + 1
+
+
+def _cycle_violation(game: WebGame) -> str | None:
+    if game.position_counts.get(game.position, 0) < 3:
+        return None
+    occurrences = [index for index, position in enumerate(game.position_history) if position == game.position]
+    if len(occurrences) < 3:
+        return None
+    cycle_start = occurrences[-3]
+    cycle_end = len(game.move_history)
+    cycle_moves = range(cycle_start, cycle_end)
+    for offender in ("w", "b"):
+        offender_moves = [index for index in cycle_moves if game.mover_sides[index] == offender]
+        if len(offender_moves) >= 2 and all(game.checking_sides[index] == offender for index in offender_moves):
+            return "black_win_long_check" if offender == "w" else "red_win_long_check"
+        target_sets = [game.chasing_targets[index] for index in offender_moves]
+        if len(target_sets) >= 2:
+            common_targets = set.intersection(*target_sets)
+            if common_targets:
+                return "black_win_long_chase" if offender == "w" else "red_win_long_chase"
     return None
 
 
 def _is_model_turn(game: WebGame) -> bool:
     return game.players[game.position.side_to_move] is not None
+
+
+def _apply_move_to_game(game: WebGame, move: Any) -> None:
+    moving_side = game.position.side_to_move
+    resets_limit = resets_natural_limit(game.position, move)
+    game.position = apply_move(game.position, move)
+    game.turn += 1
+    game.quiet_plies = 0 if resets_limit else game.quiet_plies + 1
+    game.move_history.append(move)
+    game.position_history.append(game.position)
+    game.mover_sides.append(moving_side)
+    if king_exists(game.position, "w") and king_exists(game.position, "b"):
+        checked_side = game.position.side_to_move
+        game.checking_sides.append(moving_side if is_in_check(game.position, checked_side) else None)
+        game.chasing_targets.append(attacking_targets(game.position, moving_side))
+    else:
+        game.checking_sides.append(None)
+        game.chasing_targets.append(set())
+    _record_position(game)
+    game.result = _cycle_violation(game)
+    if game.result is None:
+        game.result = _evaluate_result(game.position, game.position_counts, game.quiet_plies, game.turn)
 
 
 def _apply_one_model_move(game: WebGame) -> bool:
@@ -67,10 +141,35 @@ def _apply_one_model_move(game: WebGame) -> bool:
     player = game.players[game.position.side_to_move]
     if player is None:
         return False
-    move = player.choose_move(game.position)
-    game.position = apply_move(game.position, move)
-    game.turn += 1
-    game.result = _evaluate_result(game.position)
+    move = player.choose_move(game.position, game.position_counts)
+    _apply_move_to_game(game, move)
+    return True
+
+
+def _rebuild_game_state(game: WebGame) -> None:
+    replay_moves = list(game.move_history)
+    game.position = game.initial_position
+    game.turn = 1
+    game.result = None
+    game.last_error = None
+    game.quiet_plies = 0
+    game.position_counts = {game.position: 1}
+    game.position_history = [game.position]
+    game.move_history = []
+    game.checking_sides = []
+    game.mover_sides = []
+    game.chasing_targets = []
+
+    for move in replay_moves:
+        _apply_move_to_game(game, move)
+
+
+def _undo_last_plies(game: WebGame, plies: int) -> bool:
+    if plies < 1 or not game.move_history:
+        return False
+    keep_moves = max(len(game.move_history) - plies, 0)
+    game.move_history = game.move_history[:keep_moves]
+    _rebuild_game_state(game)
     return True
 
 
@@ -120,6 +219,7 @@ def _serialize_game(game: WebGame) -> dict[str, Any]:
         "human_side": game.human_side,
         "side_to_move": side,
         "turn": game.turn,
+        "quiet_plies": game.quiet_plies,
         "result": game.result,
         "in_check": game.result is None and is_in_check(game.position, side),
         "legal_moves": sorted(legal_set),
@@ -156,11 +256,25 @@ def create_app(dev_web_url: str | None = None) -> Flask:
     app = Flask(__name__)
     games: dict[str, WebGame] = {}
     lock = threading.Lock()
+    preferred_device = "cpu"
+    try:
+        import torch
 
-    def create_model(name: str, model_id: Any) -> Any:
+        if torch.cuda.is_available():
+            preferred_device = "cuda"
+    except Exception:
+        preferred_device = "cpu"
+    app.logger.info("model inference device: %s", preferred_device)
+
+    def create_model(name: str, model_id: Any, *, sample_moves: bool = False) -> Any:
         from backend.game.players import ModelPlayer
 
-        return ModelPlayer.from_checkpoint(name=name, checkpoint=_resolve_model(model_id), device="cpu")
+        return ModelPlayer.from_checkpoint(
+            name=name,
+            checkpoint=_resolve_model(model_id),
+            device=preferred_device,
+            sampling_temperature=0.3 if sample_moves else None,
+        )
 
     @app.get("/api/models")
     def list_models() -> Any:
@@ -191,8 +305,8 @@ def create_app(dev_web_url: str | None = None) -> Flask:
                 }
             else:
                 players = {
-                    "w": create_model("RedModel", red_model),
-                    "b": create_model("BlackModel", black_model),
+                    "w": create_model("RedModel", red_model, sample_moves=True),
+                    "b": create_model("BlackModel", black_model, sample_moves=True),
                 }
                 human_side = None
         except Exception as error:
@@ -202,10 +316,13 @@ def create_app(dev_web_url: str | None = None) -> Flask:
             game_id=str(uuid.uuid4()),
             mode=mode,
             human_side=human_side,
+            initial_position=position,
             position=position,
             players=players,
+            position_counts={position: 1},
+            position_history=[position],
         )
-        game.result = _evaluate_result(game.position)
+        game.result = _evaluate_result(game.position, game.position_counts, game.quiet_plies, game.turn)
         with lock:
             games[game.game_id] = game
         return jsonify(_serialize_game(game))
@@ -239,9 +356,7 @@ def create_app(dev_web_url: str | None = None) -> Flask:
                 legal_set = {(m.start, m.end) for m in legal_moves(game.position)}
                 if (move.start, move.end) not in legal_set:
                     return jsonify({"error": "illegal move"}), 400
-                game.position = apply_move(game.position, move)
-                game.turn += 1
-                game.result = _evaluate_result(game.position)
+                _apply_move_to_game(game, move)
                 game.last_error = None
             except Exception as error:
                 game.last_error = str(error)
@@ -250,6 +365,7 @@ def create_app(dev_web_url: str | None = None) -> Flask:
 
     @app.post("/api/games/<game_id>/step")
     def step_model(game_id: str) -> Any:
+        request_started = time.perf_counter()
         with lock:
             game = games.get(game_id)
             if game is None:
@@ -259,13 +375,48 @@ def create_app(dev_web_url: str | None = None) -> Flask:
             if not _is_model_turn(game):
                 return jsonify({"error": "current side is controlled by human"}), 400
             try:
+                apply_started = time.perf_counter()
                 moved = _apply_one_model_move(game)
+                apply_elapsed_ms = (time.perf_counter() - apply_started) * 1000.0
                 if not moved:
                     return jsonify({"error": "no model move applied"}), 400
+                serialize_started = time.perf_counter()
+                payload = _serialize_game(game)
+                serialize_elapsed_ms = (time.perf_counter() - serialize_started) * 1000.0
+                total_elapsed_ms = (time.perf_counter() - request_started) * 1000.0
+                app.logger.info(
+                    "step game=%s turn=%s apply_ms=%.1f serialize_ms=%.1f total_ms=%.1f",
+                    game.game_id,
+                    game.turn,
+                    apply_elapsed_ms,
+                    serialize_elapsed_ms,
+                    total_elapsed_ms,
+                )
                 game.last_error = None
             except Exception as error:
                 game.last_error = str(error)
                 return jsonify({"error": str(error)}), 400
+            return jsonify(payload)
+
+    @app.post("/api/games/<game_id>/undo")
+    def undo_move(game_id: str) -> Any:
+        payload = request.get_json(silent=True) or {}
+        requested_plies = payload.get("plies", 1)
+        try:
+            plies = int(requested_plies)
+        except (TypeError, ValueError):
+            return jsonify({"error": "plies must be an integer"}), 400
+        if plies < 1:
+            return jsonify({"error": "plies must be >= 1"}), 400
+
+        with lock:
+            game = games.get(game_id)
+            if game is None:
+                return jsonify({"error": "game not found"}), 404
+            if game.mode != "human-model":
+                return jsonify({"error": "undo is only supported in human-model mode"}), 400
+            if not _undo_last_plies(game, plies):
+                return jsonify({"error": "no moves to undo"}), 400
             return jsonify(_serialize_game(game))
 
     @app.get("/")

@@ -15,7 +15,7 @@ from torch import nn
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
-from backend.models import TinyResNet
+from backend.models import ResNet
 from backend.inference import complete_move_topk
 
 
@@ -24,6 +24,7 @@ class ShardPaths:
     positions: Path
     start_indices: Path | None = None
     end_indices: Path | None = None
+    values: Path | None = None
 
     @property
     def is_memory_mappable(self) -> bool:
@@ -40,13 +41,14 @@ def find_shards(data_dir: Path, split: str) -> list[ShardPaths]:
             ends = positions.with_name(f"{prefix}-end_indices.npy")
             if not starts.exists() or not ends.exists():
                 raise FileNotFoundError(f"missing label arrays for {positions}")
-            shards.append(ShardPaths(positions, starts, ends))
+            values = positions.with_name(f"{prefix}-values.npy")
+            shards.append(ShardPaths(positions, starts, ends, values if values.exists() else None))
         return shards
     return [ShardPaths(path) for path in sorted(data_dir.glob(f"{split}-*.npz"))]
 
 
-class ShardDataset(IterableDataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
-    def __init__(self, shards: list[ShardPaths], batch_size: int, worker_count: int = 1) -> None:
+class ShardDataset(IterableDataset):
+    def __init__(self, shards: list[ShardPaths], batch_size: int, worker_count: int = 1, value_head: bool = False) -> None:
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
         if worker_count < 1:
@@ -54,6 +56,7 @@ class ShardDataset(IterableDataset[tuple[torch.Tensor, torch.Tensor, torch.Tenso
         self.shards = shards
         self.batch_size = batch_size
         self.worker_count = worker_count
+        self.value_head = value_head
         self.sizes: list[int] = []
         self.training = False
         for shard in shards:
@@ -62,6 +65,11 @@ class ShardDataset(IterableDataset[tuple[torch.Tensor, torch.Tensor, torch.Tenso
                 size = len(np.load(shard.positions, mmap_mode="r"))
                 if len(np.load(shard.start_indices, mmap_mode="r")) != size:
                     raise ValueError(f"label length does not match positions in {shard.positions}")
+                if self.value_head:
+                    if shard.values is None:
+                        raise FileNotFoundError(f"value labels required for {shard.positions}")
+                    if len(np.load(shard.values, mmap_mode="r")) != size:
+                        raise ValueError(f"value label length does not match positions in {shard.positions}")
             else:
                 with np.load(shard.positions) as data:
                     size = len(data["positions"])
@@ -81,22 +89,26 @@ class ShardDataset(IterableDataset[tuple[torch.Tensor, torch.Tensor, torch.Tenso
     def sample_count(self) -> int:
         return sum(self.sizes)
 
-    @staticmethod
-    def _load_shard(shard: ShardPaths) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _load_shard(self, shard: ShardPaths) -> tuple[np.ndarray, ...]:
         if shard.is_memory_mappable:
             assert shard.start_indices is not None
             assert shard.end_indices is not None
-            return (
+            arrays: tuple[np.ndarray, ...] = (
                 np.load(shard.positions, mmap_mode="r"),
                 np.load(shard.start_indices, mmap_mode="r"),
                 np.load(shard.end_indices, mmap_mode="r"),
             )
+            if self.value_head:
+                assert shard.values is not None
+                arrays += (np.load(shard.values, mmap_mode="r"),)
+            return arrays
         with np.load(shard.positions) as data:
-            return (
+            arrays = (
                 data["positions"].copy(),
                 data["start_indices"].copy(),
                 data["end_indices"].copy(),
             )
+            return arrays
 
     def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         worker = get_worker_info()
@@ -104,12 +116,13 @@ class ShardDataset(IterableDataset[tuple[torch.Tensor, torch.Tensor, torch.Tenso
         worker_count = worker.num_workers if worker else 1
         shards = self.shards[worker_id::worker_count]
         rng = np.random.default_rng(torch.initial_seed() + worker_id)
-        pending: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        pending: tuple[np.ndarray, ...] | None = None
         if self.training:
             shards = list(shards)
             rng.shuffle(shards)
         for shard in shards:
-            positions, starts, ends = self._load_shard(shard)
+            arrays = self._load_shard(shard)
+            positions, starts, ends = arrays[:3]
             indices = np.arange(len(positions))
             if self.training:
                 rng.shuffle(indices)
@@ -117,11 +130,13 @@ class ShardDataset(IterableDataset[tuple[torch.Tensor, torch.Tensor, torch.Tenso
             if pending is not None:
                 required = self.batch_size - len(pending[0])
                 batch_indices = indices[:required]
-                current = (
+                current: tuple[np.ndarray, ...] = (
                     np.asarray(positions[batch_indices]),
                     np.asarray(starts[batch_indices]),
                     np.asarray(ends[batch_indices]),
                 )
+                if self.value_head:
+                    current += (np.asarray(arrays[3][batch_indices]),)
                 if len(current[0]) == required:
                     yield tuple(
                         torch.from_numpy(np.concatenate((previous, addition)))
@@ -137,11 +152,14 @@ class ShardDataset(IterableDataset[tuple[torch.Tensor, torch.Tensor, torch.Tenso
                     continue
             while offset + self.batch_size <= len(indices):
                 batch_indices = indices[offset : offset + self.batch_size]
-                yield (
+                batch: tuple[torch.Tensor, ...] = (
                     torch.from_numpy(np.asarray(positions[batch_indices])),
                     torch.from_numpy(np.asarray(starts[batch_indices])),
                     torch.from_numpy(np.asarray(ends[batch_indices])),
                 )
+                if self.value_head:
+                    batch += (torch.from_numpy(np.asarray(arrays[3][batch_indices])),)
+                yield batch
                 offset += self.batch_size
             if offset < len(indices):
                 batch_indices = indices[offset:]
@@ -150,6 +168,8 @@ class ShardDataset(IterableDataset[tuple[torch.Tensor, torch.Tensor, torch.Tenso
                     np.asarray(starts[batch_indices]),
                     np.asarray(ends[batch_indices]),
                 )
+                if self.value_head:
+                    pending += (np.asarray(arrays[3][batch_indices]),)
         if pending is not None:
             yield tuple(torch.from_numpy(values) for values in pending)
 
@@ -170,21 +190,42 @@ def append_metrics(path: Path, metrics: dict[str, object]) -> None:
         stream.write(json.dumps(metrics, ensure_ascii=False) + "\n")
 
 
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, limit: int | None) -> dict[str, float]:
+def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, limit: int | None, value_head: bool = False) -> dict[str, float]:
     model.eval()
     criterion = nn.CrossEntropyLoss()
     total_loss = 0.0
+    total_policy_loss = 0.0
+    total_value_loss = 0.0
+    total_value_absolute_error = 0.0
+    value_sum = value_squared_sum = prediction_sum = prediction_squared_sum = prediction_value_sum = 0.0
     total_samples = 0
     start_top1 = start_top5 = end_top1 = end_top5 = 0
     complete_top1 = complete_top5 = complete_top10 = 0
     with torch.no_grad():
-        for batch_index, (positions, starts, ends) in enumerate(loader):
+        for batch_index, batch in enumerate(loader):
+            positions, starts, ends = batch[:3]
             positions = positions.to(device, non_blocking=True)
             starts = starts.to(device, non_blocking=True)
             ends = ends.to(device, non_blocking=True)
-            start_logits, end_logits = model(positions)
-            loss = criterion(start_logits, starts) + criterion(end_logits, ends)
+            outputs = model(positions)
+            start_logits, end_logits = outputs[:2]
+            policy_loss = criterion(start_logits, starts) + criterion(end_logits, ends)
+            loss = policy_loss
+            if value_head:
+                values = batch[3].to(device, non_blocking=True)
+                predictions = outputs[2].reshape(-1)
+                values = values.reshape(-1)
+                value_loss = nn.functional.mse_loss(predictions, values)
+                loss = loss + 0.5 * value_loss
+                total_value_loss += value_loss.item() * len(positions)
+                total_value_absolute_error += torch.abs(predictions - values).sum().item()
+                value_sum += values.sum().item()
+                value_squared_sum += torch.square(values).sum().item()
+                prediction_sum += predictions.sum().item()
+                prediction_squared_sum += torch.square(predictions).sum().item()
+                prediction_value_sum += (predictions * values).sum().item()
             total_loss += loss.item() * len(positions)
+            total_policy_loss += policy_loss.item() * len(positions)
             total_samples += len(positions)
             start_top1 += (start_logits.argmax(1) == starts).sum().item()
             end_top1 += (end_logits.argmax(1) == ends).sum().item()
@@ -197,8 +238,9 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, limit: 
             if limit is not None and batch_index + 1 >= limit:
                 break
     denominator = max(total_samples, 1)
-    return {
+    metrics = {
         "loss": total_loss / denominator,
+        "policy_loss": total_policy_loss / denominator,
         "start_top1": start_top1 / denominator,
         "start_top5": start_top5 / denominator,
         "end_top1": end_top1 / denominator,
@@ -208,21 +250,37 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, limit: 
         "complete_top10": complete_top10 / denominator,
         "complete_masked": False,
     }
+    if value_head:
+        value_mean = value_sum / denominator
+        prediction_mean = prediction_sum / denominator
+        covariance = prediction_value_sum / denominator - prediction_mean * value_mean
+        value_variance = value_squared_sum / denominator - value_mean * value_mean
+        prediction_variance = prediction_squared_sum / denominator - prediction_mean * prediction_mean
+        denominator_correlation = (value_variance * prediction_variance) ** 0.5
+        metrics.update({
+            "value_loss": total_value_loss / denominator,
+            "value_mae": total_value_absolute_error / denominator,
+            "value_correlation": covariance / denominator_correlation if denominator_correlation > 0 else 0.0,
+        })
+    return metrics
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Train the Xiangqi Tiny-ResNet policy baseline.")
+    parser = argparse.ArgumentParser(description="Train the Xiangqi ResNet policy baseline.")
     parser.add_argument("--data-dir", type=Path, default=Path("data/processed/dataset"))
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--accumulation-steps", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=0.001)
+    parser.add_argument("--channels", type=int, default=64)
+    parser.add_argument("--blocks", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--mirror", action="store_true")
+    parser.add_argument("--value-head", action="store_true", help="train a new model with a supervised value head")
     parser.add_argument("--resume", type=Path, help="resume from a saved checkpoint")
     args = parser.parse_args()
 
@@ -235,8 +293,8 @@ def main() -> int:
         raise FileNotFoundError(f"train/validation/test shards not found under {args.data_dir}")
 
     worker_count = max(args.num_workers, 1)
-    train_dataset = ShardDataset(train_shards, args.batch_size, worker_count)
-    validation_dataset = ShardDataset(validation_shards, args.batch_size, worker_count)
+    train_dataset = ShardDataset(train_shards, args.batch_size, worker_count, args.value_head)
+    validation_dataset = ShardDataset(validation_shards, args.batch_size, worker_count, args.value_head)
     train_dataset.set_training(True)
     train_loader = DataLoader(
         train_dataset,
@@ -254,7 +312,7 @@ def main() -> int:
         persistent_workers=args.num_workers > 0,
     )
 
-    model = TinyResNet(channels=64, blocks=4).to(device)
+    model = ResNet(channels=args.channels, blocks=args.blocks, value_head=args.value_head).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     updates_per_epoch = max(1, (len(train_loader) + args.accumulation_steps - 1) // args.accumulation_steps)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -298,8 +356,11 @@ def main() -> int:
         epoch_started = time.perf_counter()
         epoch_batches = len(train_loader)
         training_loss_total = 0.0
+        training_policy_loss_total = 0.0
+        training_value_loss_total = 0.0
         training_samples = 0
-        for batch_index, (positions, starts, ends) in enumerate(train_loader):
+        for batch_index, batch in enumerate(train_loader):
+            positions, starts, ends = batch[:3]
             positions = positions.to(device, non_blocking=True)
             starts = starts.to(device, non_blocking=True)
             ends = ends.to(device, non_blocking=True)
@@ -307,9 +368,19 @@ def main() -> int:
                 positions = torch.flip(positions, dims=[3])
                 starts = (starts // positions.shape[3]) * positions.shape[3] + (positions.shape[3] - 1 - starts % positions.shape[3])
                 ends = (ends // positions.shape[3]) * positions.shape[3] + (positions.shape[3] - 1 - ends % positions.shape[3])
-            start_logits, end_logits = model(positions)
-            batch_loss = criterion(start_logits, starts) + criterion(end_logits, ends)
+            outputs = model(positions)
+            start_logits, end_logits = outputs[:2]
+            policy_loss = criterion(start_logits, starts) + criterion(end_logits, ends)
+            batch_loss = policy_loss
+            value_loss = None
+            if args.value_head:
+                values = batch[3].to(device, non_blocking=True)
+                value_loss = nn.functional.mse_loss(outputs[2].reshape(-1), values.reshape(-1))
+                batch_loss = batch_loss + 0.5 * value_loss
             training_loss_total += batch_loss.item() * len(positions)
+            training_policy_loss_total += policy_loss.item() * len(positions)
+            if value_loss is not None:
+                training_value_loss_total += value_loss.item() * len(positions)
             training_samples += len(positions)
             loss = batch_loss / args.accumulation_steps
             loss.backward()
@@ -339,7 +410,13 @@ def main() -> int:
                 )
             if args.max_steps is not None and global_step >= args.max_steps:
                 break
-        validation_metrics = evaluate(model, validation_loader, device, limit=50 if args.max_steps else None)
+        validation_metrics = evaluate(
+            model,
+            validation_loader,
+            device,
+            limit=50 if args.max_steps else None,
+            value_head=args.value_head,
+        )
         validation_loss = validation_metrics["loss"]
         improved = validation_loss < best_validation_loss
         if improved:
@@ -368,6 +445,8 @@ def main() -> int:
                 "epoch": epoch + 1,
                 "global_step": global_step,
                 "training_loss": training_loss_total / max(training_samples, 1),
+                "training_policy_loss": training_policy_loss_total / max(training_samples, 1),
+                **({"training_value_loss": training_value_loss_total / max(training_samples, 1)} if args.value_head else {}),
                 "validation": validation_metrics,
                 "learning_rate": optimizer.param_groups[0]["lr"],
                 "epoch_seconds": time.perf_counter() - epoch_started,
@@ -379,7 +458,7 @@ def main() -> int:
             break
         if args.max_steps is not None and global_step >= args.max_steps:
             break
-    test_dataset = ShardDataset(test_shards, args.batch_size, worker_count)
+    test_dataset = ShardDataset(test_shards, args.batch_size, worker_count, args.value_head)
     test_loader = DataLoader(
         test_dataset,
         batch_size=None,
@@ -387,7 +466,13 @@ def main() -> int:
         pin_memory=device.type == "cuda",
         persistent_workers=args.num_workers > 0,
     )
-    test_metrics = evaluate(model, test_loader, device, limit=50 if args.max_steps else None)
+    test_metrics = evaluate(
+        model,
+        test_loader,
+        device,
+        limit=50 if args.max_steps else None,
+        value_head=args.value_head,
+    )
     print(json.dumps({"test": test_metrics}, ensure_ascii=False), flush=True)
     return 0
 

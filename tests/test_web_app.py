@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from backend.game.players import ModelPlayer
-from backend.models import TinyResNet
+from backend.models import ResNet
 
 
 def test_web_lists_models_from_models_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -49,12 +49,12 @@ def test_model_player_loads_training_checkpoint_with_windows_path_metadata(tmp_p
     checkpoint_path = tmp_path / "model.pt"
     torch.save(
         {
-            "model": TinyResNet().state_dict(),
-            "config": {"checkpoint_dir": WindowsPath("checkpoints/run-1")},
+            "model": ResNet(channels=96, blocks=6).state_dict(),
+            "config": {"checkpoint_dir": WindowsPath("checkpoints/run-1"), "channels": 96, "blocks": 6},
         },
         checkpoint_path,
     )
 
     player = ModelPlayer.from_checkpoint(name="Model", checkpoint=checkpoint_path)
 
-    assert isinstance(player.model, TinyResNet)
+    assert isinstance(player.model, ResNet)

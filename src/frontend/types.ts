@@ -13,6 +13,7 @@ export interface Game {
   human_side: Side | null
   side_to_move: Side
   turn: number
+  quiet_plies: number
   result: string | null
   in_check: boolean
   legal_moves: string[]

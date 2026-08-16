@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { request } from './api'
-import { GameView } from './game-view'
+import { HumanModelView } from './human-model-view'
+import { ModelMatchView } from './model-match-view'
 import { ReplayView } from './replay-view'
 import type { Mode, ModelOption } from './types'
 
@@ -34,8 +35,8 @@ export function App(): React.JSX.Element {
         </nav>
       </header>
       {error && <p className="error" role="alert">{error}</p>}
-      <GameView active={mode === 'human-model'} mode="human-model" models={models} modelsLoaded={modelsLoaded} />
-      <GameView active={mode === 'model-model'} mode="model-model" models={models} modelsLoaded={modelsLoaded} />
+      <HumanModelView active={mode === 'human-model'} models={models} modelsLoaded={modelsLoaded} />
+      <ModelMatchView active={mode === 'model-model'} models={models} modelsLoaded={modelsLoaded} />
       <ReplayView active={mode === 'replay'} />
     </main>
   )

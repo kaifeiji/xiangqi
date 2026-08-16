@@ -11,12 +11,13 @@ const START_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR'
 interface XiangqiBoardProps {
   active: boolean
   game: Game | undefined
+  orientation?: 'white' | 'black'
   lastMove: Key[] | undefined
   readOnly: boolean
   onMove: (origin: Key, destination: Key) => void
 }
 
-export function XiangqiBoard({ active, game, lastMove, readOnly, onMove }: XiangqiBoardProps): React.JSX.Element {
+export function XiangqiBoard({ active, game, orientation = 'white', lastMove, readOnly, onMove }: XiangqiBoardProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const boardRef = useRef<Api | undefined>(undefined)
 
@@ -26,7 +27,7 @@ export function XiangqiBoard({ active, game, lastMove, readOnly, onMove }: Xiang
     }
     const config: Config = {
       fen: game ? boardToFen(game.board) : START_FEN,
-      orientation: game?.human_side === 'b' ? 'black' : 'white',
+      orientation,
       turnColor: game?.side_to_move === 'b' ? 'black' : 'white',
       check: game?.in_check ? (game.side_to_move === 'w' ? 'white' : 'black') : false,
       lastMove: game ? lastMove : undefined,

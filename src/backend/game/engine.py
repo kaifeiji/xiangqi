@@ -260,6 +260,22 @@ def apply_move(position: Position, move: Move) -> Position:
     return Position(_freeze_board(board), "b" if position.side_to_move == "w" else "w")
 
 
+def resets_natural_limit(position: Position, move: Move) -> bool:
+    """Return whether a move resets the no-capture/no-pawn-crossing counter."""
+    start_row, start_col = index_to_coord(move.start)
+    end_row, end_col = index_to_coord(move.end)
+    piece = _piece_at(position, start_row, start_col)
+    if piece is None:
+        raise ValueError(f"empty start square: {move_to_iccs(move)}")
+    if _piece_at(position, end_row, end_col) is not None:
+        return True
+    if piece == "P":
+        return start_row < 5 <= end_row
+    if piece == "p":
+        return start_row > 4 >= end_row
+    return False
+
+
 def is_in_check(position: Position, side: str) -> bool:
     king_row, king_col = _king_square(position, side)
     enemy_side = "b" if side == "w" else "w"
@@ -273,6 +289,22 @@ def is_in_check(position: Position, side: str) -> bool:
                 if (end_row, end_col) == (king_row, king_col):
                     return True
     return False
+
+
+def attacking_targets(position: Position, side: str) -> set[tuple[int, int, str]]:
+    targets: set[tuple[int, int, str]] = set()
+    for row in range(BOARD_ROWS):
+        for col in range(BOARD_COLS):
+            piece = _piece_at(position, row, col)
+            if piece is None or not _own_piece(piece, side):
+                continue
+            attacker = coord_to_index(row, col)
+            for move in _piece_moves(position, row, col, piece):
+                end_row, end_col = index_to_coord(move.end)
+                target = _piece_at(position, end_row, end_col)
+                if target is not None and _enemy_piece(target, side) and target.upper() != "K":
+                    targets.add((attacker, move.end, target.upper()))
+    return targets
 
 
 def legal_moves(position: Position) -> list[Move]:
@@ -295,6 +327,13 @@ def legal_moves(position: Position) -> list[Move]:
 def king_exists(position: Position, side: str) -> bool:
     target = "K" if side == "w" else "k"
     return any(target in row for row in position.board)
+
+
+def is_theoretical_draw(position: Position) -> bool:
+    """Return whether the position has only kings, advisors, and elephants."""
+    if not king_exists(position, "w") or not king_exists(position, "b"):
+        return False
+    return all(piece is None or piece.upper() in {"K", "A", "B"} for row in position.board for piece in row)
 
 
 def render_board(position: Position) -> str:

@@ -9,11 +9,22 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 
 from data_encoding import apply_move, encode_fen, iccs_to_indices, indices_to_iccs
-from prepare_data import convert_npz_dataset
+from prepare_data import convert_npz_dataset, position_value
 from train import ShardDataset, append_metrics, find_shards
 
 
 STARTING_FEN = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
+
+
+def test_position_value_uses_side_to_move_perspective() -> None:
+    red_position = encode_fen(STARTING_FEN)
+    start, end = iccs_to_indices("C3-C4")
+    black_position = apply_move(red_position, start, end)
+
+    assert position_value("1-0", red_position) == 1.0
+    assert position_value("1-0", black_position) == -1.0
+    assert position_value("0-1", red_position) == -1.0
+    assert position_value("1/2-1/2", black_position) == 0.0
 
 
 def test_encode_and_replay_move_updates_side_to_move() -> None:

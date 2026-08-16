@@ -5,6 +5,7 @@ description = "Chinese chess move prediction training project"
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "flask>=3.0,<4",
+    "cchess>=1.25,<2",
     "numpy>=2.0,<3",
     "torch==2.6.0",
 ]
