@@ -62,14 +62,16 @@ def test_repeated_cycle_assigns_long_check_to_checking_side() -> None:
     from backend.app import WebGame, _cycle_violation
 
     position = parse_fen("3k5/9/9/9/9/9/9/9/3A5/4K4 w - - 0 1")
+    other_position = parse_fen("4k4/9/9/9/9/9/9/9/9/4K4 w - - 0 1")
     game = WebGame(
         game_id="long-check",
         mode="model-model",
         human_side=None,
+        initial_position=position,
         position=position,
         players={"w": object(), "b": object()},
         position_counts={position: 3},
-        position_history=[position] * 5,
+        position_history=[position, other_position, position, other_position, position],
         move_history=[Move(0, 1)] * 4,
         mover_sides=["w", "b", "w", "b"],
         checking_sides=["w", None, "w", None],
@@ -84,15 +86,17 @@ def test_repeated_cycle_assigns_long_chase_to_attacking_side() -> None:
     from backend.app import WebGame, _cycle_violation
 
     position = parse_fen("3k5/9/9/9/9/9/9/9/3A5/4K4 w - - 0 1")
+    other_position = parse_fen("4k4/9/9/9/9/9/9/9/9/4K4 w - - 0 1")
     target = (3, 4, "A")
     game = WebGame(
         game_id="long-chase",
         mode="model-model",
         human_side=None,
+        initial_position=position,
         position=position,
         players={"w": object(), "b": object()},
         position_counts={position: 3},
-        position_history=[position] * 5,
+        position_history=[position, other_position, position, other_position, position],
         move_history=[Move(0, 1)] * 4,
         mover_sides=["w", "b", "w", "b"],
         checking_sides=[None] * 4,
@@ -115,15 +119,17 @@ def test_model_match_stops_after_third_repeated_position() -> None:
         def choose_move(self, _position: object, _position_counts: object = None) -> Move:
             return next(self.moves)
 
-    red_moves = [Move(9, 18), Move(18, 9)]
-    black_moves = [Move(79, 70), Move(70, 79)]
+    red_moves = [Move(9, 18), Move(18, 9)] * 2
+    black_moves = [Move(80, 71), Move(71, 80)] * 2
     game = WebGame(
         game_id="cycle",
         mode="model-model",
         human_side=None,
+        initial_position=position,
         position=position,
         players={"w": _CyclePlayer(red_moves), "b": _CyclePlayer(black_moves)},
         position_counts={position: 1},
+        position_history=[position],
     )
 
     for _ in range(7):

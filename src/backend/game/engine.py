@@ -84,6 +84,25 @@ def parse_fen(fen: str) -> Position:
     return Position(tuple(rows), side)
 
 
+def position_to_fen(position: Position) -> str:
+    ranks: list[str] = []
+    for row in reversed(position.board):
+        empty_count = 0
+        cells: list[str] = []
+        for piece in row:
+            if piece is None:
+                empty_count += 1
+                continue
+            if empty_count:
+                cells.append(str(empty_count))
+                empty_count = 0
+            cells.append(piece)
+        if empty_count:
+            cells.append(str(empty_count))
+        ranks.append("".join(cells))
+    return f"{'/'.join(ranks)} {position.side_to_move} - - 0 1"
+
+
 def _to_mutable_board(position: Position) -> list[list[str | None]]:
     return [list(row) for row in position.board]
 

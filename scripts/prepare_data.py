@@ -559,7 +559,7 @@ def add_value_labels(dataset_dir: Path, overwrite: bool) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scan and structurally validate Xiangqi PGNS files.")
     parser.add_argument("--input", nargs="+", type=Path, default=list(DEFAULT_INPUTS))
-    parser.add_argument("--output-dir", type=Path, default=Path("artifacts"))
+    parser.add_argument("--output-dir", type=Path, default=Path("data/processed/dataset"))
     parser.add_argument("--scan-only", action="store_true")
     parser.add_argument("--validate", action="store_true")
     parser.add_argument("--export", action="store_true")

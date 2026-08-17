@@ -30,6 +30,7 @@ from backend.game.engine import (
 )
 
 MODEL_SUFFIXES = {".ckpt", ".pt", ".pth"}
+PIKAFISH_MODEL_ID = "pikafish"
 NATURAL_LIMIT_PLIES = 120
 MAX_PLIES = 600
 PROJECT_DIR = Path(__file__).resolve().parents[2]
@@ -230,13 +231,18 @@ def _serialize_game(game: WebGame) -> dict[str, Any]:
 
 
 def _available_models() -> list[dict[str, str]]:
-    if not MODELS_DIR.is_dir():
-        return []
-    return [
+    models = []
+    if MODELS_DIR.is_dir():
+        models = [
         {"id": path.relative_to(MODELS_DIR).as_posix(), "name": path.name}
         for path in sorted(MODELS_DIR.rglob("*"))
         if path.is_file() and path.suffix.lower() in MODEL_SUFFIXES
-    ]
+        ]
+    from backend.game.players import pikafish_command
+
+    if pikafish_command() is not None:
+        models.append({"id": PIKAFISH_MODEL_ID, "name": "Pikafish (NNUE + alpha-beta)"})
+    return models
 
 
 def _resolve_model(model_id: Any) -> Path:
@@ -267,7 +273,10 @@ def create_app(dev_web_url: str | None = None) -> Flask:
     app.logger.info("model inference device: %s", preferred_device)
 
     def create_model(name: str, model_id: Any, *, sample_moves: bool = False) -> Any:
-        from backend.game.players import ModelPlayer
+        from backend.game.players import ModelPlayer, PikafishPlayer
+
+        if model_id == PIKAFISH_MODEL_ID:
+            return PikafishPlayer.from_environment(name=name)
 
         return ModelPlayer.from_checkpoint(
             name=name,
@@ -477,7 +486,7 @@ def main() -> int:
         _build_web_client()
     app = create_app(f"http://{args.host}:{args.web_port}" if args.dev else None)
     try:
-        app.run(host=args.host, port=args.port, debug=args.debug, use_reloader=not args.dev)
+        app.run(host=args.host, port=args.port, debug=args.debug, use_reloader=args.debug)
     finally:
         if dev_server is not None:
             dev_server.terminate()

@@ -1,1 +1,1 @@
-Place model checkpoints here. The web app lists .pt, .pth, and .ckpt files in this directory and its subdirectories.
+请将模型放在这里。Web 应用会列出此目录及其子目录中的 .pt、.pth 和 .ckpt 文件。

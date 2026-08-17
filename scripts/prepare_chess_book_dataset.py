@@ -333,7 +333,7 @@ def write_category_dataset(games: list[BookGame], output_dir: Path, shard_size: 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Prepare separate Chinese chess book datasets by category.")
     parser.add_argument("--input-dir", type=Path, default=Path("data/raw/chess_book-main"))
-    parser.add_argument("--output-dir", type=Path, default=Path("artifacts/chess_book_dataset"))
+    parser.add_argument("--output-dir", type=Path, default=Path("data/processed/chess_book_dataset"))
     parser.add_argument("--shard-size", type=int, default=4096)
     parser.add_argument("--max-games", type=int)
     parser.add_argument("--resume", action="store_true", help="resume from per-category parsed-game checkpoints")

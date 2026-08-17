@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+import queue
+import shutil
+import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path, WindowsPath
 from typing import Protocol
@@ -20,6 +25,7 @@ from .engine import (
     iccs_to_move,
     legal_moves,
     move_to_iccs,
+    position_to_fen,
 )
 
 _PIECE_CHANNELS: dict[str, int] = {
@@ -44,6 +50,23 @@ class Player(Protocol):
     name: str
 
     def choose_move(self, position: Position) -> Move: ...
+
+
+def pikafish_command() -> str | None:
+    configured_path = os.environ.get("PIKAFISH_PATH")
+    if configured_path:
+        path = Path(configured_path).expanduser()
+        return str(path) if path.is_file() else None
+    path_command = shutil.which("pikafish") or shutil.which("pikafish.exe")
+    if path_command:
+        return path_command
+
+    workspace_dir = Path(__file__).resolve().parents[4]
+    for install_dir in sorted(workspace_dir.glob("Pikafish.*"), reverse=True):
+        candidate = install_dir / "Windows" / "pikafish-avx2.exe"
+        if candidate.is_file():
+            return str(candidate)
+    return None
 
 
 def position_to_tensor(position: Position) -> torch.Tensor:
@@ -163,3 +186,127 @@ class ModelPlayer:
         if (move.start, move.end) not in {(m.start, m.end) for m in legal}:
             raise RuntimeError(f"model selected illegal move: {move_to_iccs(move)}")
         return move
+
+
+class PikafishPlayer:
+    """UCI adapter for Pikafish's built-in NNUE alpha-beta search."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        command: str,
+        move_time_ms: int = 1000,
+        threads: int | None = None,
+        hash_mb: int | None = None,
+    ) -> None:
+        if move_time_ms < 1:
+            raise ValueError("Pikafish move time must be positive")
+        self.name = name
+        self.command = command
+        self.move_time_ms = move_time_ms
+        self.threads = threads
+        self.hash_mb = hash_mb
+        self._process: subprocess.Popen[str] | None = None
+        self._lines: queue.Queue[str | None] = queue.Queue()
+        self._lock = threading.Lock()
+
+    @classmethod
+    def from_environment(cls, *, name: str) -> "PikafishPlayer":
+        command = pikafish_command()
+        if command is None:
+            raise ValueError("Pikafish executable not found; set PIKAFISH_PATH or add pikafish to PATH")
+        return cls(
+            name=name,
+            command=command,
+            move_time_ms=int(os.environ.get("PIKAFISH_MOVE_TIME_MS", "1000")),
+            threads=_positive_environment_int("PIKAFISH_THREADS"),
+            hash_mb=_positive_environment_int("PIKAFISH_HASH_MB"),
+        )
+
+    def _start(self) -> None:
+        if self._process is not None and self._process.poll() is None:
+            return
+        self._lines = queue.Queue()
+        engine_path = Path(self.command)
+        install_dir = engine_path.parent.parent
+        working_dir = install_dir if (install_dir / "pikafish.nnue").is_file() else None
+        self._process = subprocess.Popen(
+            [self.command],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=working_dir,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        assert self._process.stdout is not None
+        threading.Thread(target=self._read_output, daemon=True).start()
+        self._send("uci")
+        self._wait_for("uciok")
+        if self.threads is not None:
+            self._send(f"setoption name Threads value {self.threads}")
+        if self.hash_mb is not None:
+            self._send(f"setoption name Hash value {self.hash_mb}")
+        self._send("isready")
+        self._wait_for("readyok")
+
+    def _read_output(self) -> None:
+        assert self._process is not None and self._process.stdout is not None
+        for line in self._process.stdout:
+            self._lines.put(line.strip())
+        self._lines.put(None)
+
+    def _send(self, command: str) -> None:
+        if self._process is None or self._process.stdin is None:
+            raise RuntimeError("Pikafish process is not running")
+        self._process.stdin.write(f"{command}\n")
+        self._process.stdin.flush()
+
+    def _wait_for(self, expected: str) -> str:
+        while True:
+            try:
+                line = self._lines.get(timeout=10)
+            except queue.Empty as error:
+                raise RuntimeError(f"Pikafish timed out waiting for {expected}") from error
+            if line is None:
+                raise RuntimeError("Pikafish exited unexpectedly")
+            if line == expected or line.startswith(f"{expected} "):
+                return line
+
+    def choose_move(self, position: Position, position_counts: dict[Position, int] | None = None) -> Move:
+        legal = legal_moves(position)
+        if not legal:
+            raise ValueError("no legal moves available")
+        with self._lock:
+            self._start()
+            self._send(f"position fen {position_to_fen(position)}")
+            self._send(f"go movetime {self.move_time_ms}")
+            response = self._wait_for("bestmove").split()
+        if len(response) < 2 or response[1] == "(none)":
+            raise RuntimeError("Pikafish returned no move")
+        uci_move = response[1]
+        if len(uci_move) == 4:
+            uci_move = f"{uci_move[:2]}-{uci_move[2:]}"
+        try:
+            move = iccs_to_move(uci_move)
+        except ValueError as error:
+            raise RuntimeError(f"invalid Pikafish move: {response[1]}") from error
+        if move not in legal:
+            raise RuntimeError(f"Pikafish selected illegal move: {move_to_iccs(move)}")
+        return move
+
+
+def _positive_environment_int(name: str) -> int | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+    if parsed < 1:
+        raise ValueError(f"{name} must be positive")
+    return parsed

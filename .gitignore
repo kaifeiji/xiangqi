@@ -7,7 +7,9 @@ __pycache__/
 node_modules/
 dist/
 .vscode/
-artifacts/
-data/
-checkpoints/
-models/
+/data/**
+!/data/README.md
+/checkpoints/**
+!/checkpoints/README.md
+/models/**
+!/models/README.md

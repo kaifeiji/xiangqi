@@ -46,7 +46,7 @@ data/raw/WXF-41743games.pgns
 
 当前直接支持 `XQF`、`CBR`、`CBL`，其中 CBL 展开为多局；`QP`、`SG`、`XQN` 等未接入策略导出。脚本按源文件写入 `parsed_games.checkpoint.jsonl`，可用 `--resume` 断点继续。
 
-QP 已通过 `scripts/reverse_qp.py` 单独逆向：3725 个文件均可解码为 FEN 初始局面，输出 `artifacts/qp_decoded_positions.jsonl`。QP 不包含已确认的解法走法，因此不能直接作为 `(position, start, end)` 策略监督样本；在补充解法或价值标签前，只能作为残局局面集合使用。
+QP 已通过 `scripts/reverse_qp.py` 单独逆向：3725 个文件均可解码为 FEN 初始局面，输出 `data/intermediate/qp_decoded_positions.jsonl`。QP 不包含已确认的解法走法，因此不能直接作为 `(position, start, end)` 策略监督样本；在补充解法或价值标签前，只能作为残局局面集合使用。
 
 ## 阶段一：原始文件扫描
 
@@ -62,7 +62,7 @@ QP 已通过 `scripts/reverse_qp.py` 单独逆向：3725 个文件均可解码�
 - 标签跨行、未闭合引号和异常换行数量。
 - 结果 `1-0`、`0-1`、`1/2-1/2` 和未知值分布。
 
-此阶段只读原始文件，不生成训练数据。输出 `artifacts/data_scan.json`。
+此阶段只读原始文件，不生成训练数据。输出 `data/intermediate/data_scan.json`。
 
 ## 阶段二：解析和格式校验
 
@@ -97,9 +97,9 @@ apply_move(position, start_index, end_index)
 输出：
 
 ```text
-artifacts/validated_games.jsonl
-artifacts/data_errors.jsonl
-artifacts/validation_summary.json
+data/intermediate/validated_games.jsonl
+data/intermediate/data_errors.jsonl
+data/intermediate/validation_summary.json
 ```
 
 每条成功棋局至少保留 `game_id`、来源文件、局号、规范化元数据、起始 FEN、完整 ICCS 着法序列、最终结果和输入文件哈希。
@@ -122,10 +122,10 @@ artifacts/validation_summary.json
 输出：
 
 ```text
-artifacts/train_games.jsonl
-artifacts/validation_games.jsonl
-artifacts/test_games.jsonl
-artifacts/split_manifest.json
+data/intermediate/train_games.jsonl
+data/intermediate/validation_games.jsonl
+data/intermediate/test_games.jsonl
+data/intermediate/split_manifest.json
 ```
 
 ## 阶段四：生成训练样本
@@ -156,9 +156,9 @@ dtype: float32
 起点和终点标签均为 `int64`，范围 `0~89`。每条样本还要保留 `game_id`、`ply`、当前行棋方、结果和阶段索引，至少在旁路元数据中可追溯。输出使用三个未压缩 `.npy` 数组组成一个分片，避免一次性构造过大的单个数组，并允许训练进程使用内存映射读取；分片只允许在棋局结束后刷新，即使超过 `shard_size` 也不能把同一 `game_id` 拆到多个分片：
 
 ```text
-artifacts/dataset/train-000-positions.npy
-artifacts/dataset/train-000-start_indices.npy
-artifacts/dataset/train-000-end_indices.npy
+data/processed/dataset/train-000-positions.npy
+data/processed/dataset/train-000-start_indices.npy
+data/processed/dataset/train-000-end_indices.npy
 ```
 
 每组三个数组包含：
@@ -209,20 +209,20 @@ end_indices: int64 [N]
 - 样本数量等于成功棋局所有有效 ply 的总和。
 - 随机抽样的局面、标签和执行后局面可人工复核。
 
-建议入口：`scripts/validate_dataset.py`，输出 `artifacts/dataset_summary.json`。只有验收通过后才开始训练。
+建议入口：`scripts/validate_dataset.py`，输出 `data/intermediate/dataset_summary.json`。只有验收通过后才开始训练。
 
 ## 交付物
 
 ```text
-artifacts/data_scan.json
-artifacts/validated_games.jsonl
-artifacts/data_errors.jsonl
-artifacts/validation_summary.json
-artifacts/split_manifest.json
-artifacts/dataset/train-*-positions.npy
-artifacts/dataset/train-*-start_indices.npy
-artifacts/dataset/train-*-end_indices.npy
-artifacts/dataset_summary.json
+data/intermediate/data_scan.json
+data/intermediate/validated_games.jsonl
+data/intermediate/data_errors.jsonl
+data/intermediate/validation_summary.json
+data/intermediate/split_manifest.json
+data/processed/dataset/train-*-positions.npy
+data/processed/dataset/train-*-start_indices.npy
+data/processed/dataset/train-*-end_indices.npy
+data/processed/dataset_summary.json
 ```
 
 详细模型输入输出约定见 [模型接口设计](model_interface.md)，总体训练取舍见 [训练计划](plan.md) 和 [象棋训练实践调研](training_best_practices.md)。

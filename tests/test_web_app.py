@@ -12,6 +12,7 @@ from backend.models import ResNet
 def test_web_lists_models_from_models_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     pytest.importorskip("flask")
     import backend.app as app_module
+    import backend.game.players as players_module
 
     models_dir = tmp_path / "models"
     models_dir.mkdir()
@@ -20,6 +21,7 @@ def test_web_lists_models_from_models_directory(monkeypatch: pytest.MonkeyPatch,
     (models_dir / "nested" / "second.ckpt").touch()
     (models_dir / "ignore.txt").touch()
     monkeypatch.setattr(app_module, "MODELS_DIR", models_dir)
+    monkeypatch.setattr(players_module, "pikafish_command", lambda: None)
 
     app = app_module.create_app()
     client = app.test_client()
@@ -29,6 +31,23 @@ def test_web_lists_models_from_models_directory(monkeypatch: pytest.MonkeyPatch,
     assert response.get_json()["models"] == [
         {"id": "first.pt", "name": "first.pt"},
         {"id": "nested/second.ckpt", "name": "second.ckpt"},
+    ]
+
+
+def test_web_lists_pikafish_when_available(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    pytest.importorskip("flask")
+    import backend.app as app_module
+    import backend.game.players as players_module
+
+    monkeypatch.setattr(app_module, "MODELS_DIR", tmp_path / "models")
+    monkeypatch.setattr(players_module, "pikafish_command", lambda: "C:/tools/pikafish.exe")
+
+    app = app_module.create_app()
+    response = app.test_client().get("/api/models")
+
+    assert response.status_code == 200
+    assert response.get_json()["models"] == [
+        {"id": "pikafish", "name": "Pikafish (NNUE + alpha-beta)"}
     ]
 
 
