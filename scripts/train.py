@@ -283,7 +283,7 @@ def main() -> int:
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--channels", type=int, default=64)
     parser.add_argument("--blocks", type=int, default=4)
-    parser.add_argument("--current-view", action="store_true", help="train with 14-channel current-side-view inputs")
+    parser.add_argument("--current-view", action="store_true", help="train with current-side-view inputs")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--prefetch-factor", type=int, default=4, help="batches prefetched per DataLoader worker")
     parser.add_argument("--max-steps", type=int)
@@ -292,7 +292,14 @@ def main() -> int:
     parser.add_argument("--mirror", action="store_true")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True, help="use CUDA mixed precision")
     parser.add_argument("--value-head", action="store_true", help="train a new model with a supervised value head")
-    parser.add_argument("--resume", type=Path, help="resume from a saved checkpoint")
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const=True,
+        default=False,
+        metavar="CHECKPOINT",
+        help="resume from checkpoint-dir/last.pt, or from CHECKPOINT when provided",
+    )
     args = parser.parse_args()
     if args.prefetch_factor < 1:
         parser.error("--prefetch-factor must be positive")
@@ -330,12 +337,10 @@ def main() -> int:
         **loader_options,
     )
 
-    input_channels = 14 if args.current_view else 15
     model = ResNet(
         channels=args.channels,
         blocks=args.blocks,
         value_head=args.value_head,
-        input_channels=input_channels,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     updates_per_epoch = max(1, (len(train_loader) + args.accumulation_steps - 1) // args.accumulation_steps)
@@ -350,8 +355,9 @@ def main() -> int:
     global_step = 0
     start_epoch = 0
 
-    if args.resume is not None:
-        checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+    if args.resume:
+        resume_path = args.checkpoint_dir / "last.pt" if args.resume is True else Path(args.resume)
+        checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
@@ -362,7 +368,7 @@ def main() -> int:
         best_validation_loss = float(checkpoint.get("best_validation_loss", checkpoint["validation_loss"]))
         epochs_without_improvement = int(checkpoint.get("epochs_without_improvement", 0))
         print(json.dumps({
-            "resumed_from": str(args.resume),
+            "resumed_from": str(resume_path),
             "start_epoch": start_epoch,
             "global_step": global_step,
             "best_validation_loss": best_validation_loss,
@@ -478,7 +484,6 @@ def main() -> int:
             "epochs_without_improvement": epochs_without_improvement,
             "config": {
                 **vars(args),
-                "input_channels": input_channels,
                 "current_view": args.current_view,
             },
         }

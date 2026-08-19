@@ -93,7 +93,7 @@ def current_view_tensor(position: Position, board: torch.Tensor) -> torch.Tensor
     transformed = torch.empty_like(board)
     transformed[:7] = torch.flip(board[7:14], dims=[1, 2])
     transformed[7:14] = torch.flip(board[:7], dims=[1, 2])
-    transformed[14] = 1.0
+    transformed[14] = 0.0
     return transformed
 
 
@@ -127,7 +127,6 @@ class ModelPlayer:
     sampling_temperature: float | None = None
     sampling_top_k: int = 5
     current_view: bool = False
-    input_channels: int = 15
     value_head: bool = False
     mcts_time_seconds: float = 0.0
     opening_plies: int = 2
@@ -159,7 +158,6 @@ class ModelPlayer:
             channels = int(config.get("channels", 64))
             blocks = int(config.get("blocks", 4))
             value_head = bool(config.get("value_head", False))
-            input_channels = int(config.get("input_channels", 15))
             if current_view is None:
                 current_view = bool(config.get("current_view", False))
             if isinstance(state, dict) and "model_state_dict" in state:
@@ -170,12 +168,10 @@ class ModelPlayer:
                 channels=channels,
                 blocks=blocks,
                 value_head=value_head,
-                input_channels=input_channels,
             )
             model.load_state_dict(state)
         else:
             model = ResNet()
-            input_channels = 15
             value_head = False
         if current_view is None:
             current_view = False
@@ -188,7 +184,6 @@ class ModelPlayer:
             sampling_temperature=sampling_temperature,
             sampling_top_k=sampling_top_k,
             current_view=current_view,
-            input_channels=input_channels,
             value_head=value_head,
             mcts_time_seconds=mcts_time_seconds if value_head else 0.0,
         )
@@ -202,8 +197,6 @@ class ModelPlayer:
         board = position_to_tensor(position)
         if self.current_view:
             board = current_view_tensor(position, board)
-            if self.input_channels == 14:
-                board = board[:14]
         with torch.no_grad():
             outputs = self.model(board.unsqueeze(0).to(self.device))
         value = float(outputs[2].reshape(-1)[0].item()) if self.value_head else 0.0
@@ -267,8 +260,6 @@ class ModelPlayer:
         model_legal = [(move.start, move.end) for move in legal]
         if self.current_view:
             board = current_view_tensor(position, board)
-            if self.input_channels == 14:
-                board = board[:14]
             if position.side_to_move == "b":
                 model_legal = [
                     (current_view_index(move.start), current_view_index(move.end))

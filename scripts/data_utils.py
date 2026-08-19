@@ -19,11 +19,44 @@ PIECE_CHANNELS = {
     "k": 7, "a": 8, "b": 9, "n": 10, "r": 11, "c": 12, "p": 13,
 }
 FEN_PIECES = set(PIECE_CHANNELS)
+RED_WIN_RESULT = "1-0"
+BLACK_WIN_RESULT = "0-1"
+DRAW_RESULT = "1/2-1/2"
+VALID_GAME_RESULTS = {RED_WIN_RESULT, BLACK_WIN_RESULT, DRAW_RESULT}
+VALID_OR_UNKNOWN_GAME_RESULTS = VALID_GAME_RESULTS | {"*"}
 EXCLUDED_GAMES = {
     ("dpxq-99813games.pgns", 7097),
     ("dpxq-99813games.pgns", 7106),
     ("dpxq-99813games.pgns", 7107),
 }
+
+
+def current_view_index(index: int) -> int:
+    """Map an ICCS board index after a 180-degree board rotation."""
+    return BOARD_ROWS * BOARD_COLS - 1 - index
+
+
+def current_view_position(position: np.ndarray, red_to_move: bool) -> np.ndarray:
+    """Put the side to move at the bottom and keep original red-to-move state."""
+    if position.shape != (14, BOARD_ROWS, BOARD_COLS):
+        raise ValueError("expected position shape (14, 10, 9)")
+    if red_to_move:
+        transformed = position.copy()
+    else:
+        transformed = np.empty((14, BOARD_ROWS, BOARD_COLS), dtype=position.dtype)
+        transformed[:7] = np.flip(position[7:14], axis=(1, 2))
+        transformed[7:14] = np.flip(position[:7], axis=(1, 2))
+    with_side = np.empty((CHANNELS, BOARD_ROWS, BOARD_COLS), dtype=position.dtype)
+    with_side[:14] = transformed
+    with_side[14, :, :] = 1.0 if red_to_move else 0.0
+    return with_side
+
+
+def side_to_move_sign(position: np.ndarray) -> float:
+    """Return +1 for red-to-move and -1 for black-to-move."""
+    if position.shape != (CHANNELS, BOARD_ROWS, BOARD_COLS):
+        raise ValueError(f"expected position shape {(CHANNELS, BOARD_ROWS, BOARD_COLS)}")
+    return 1.0 if bool(position[14, 0, 0]) else -1.0
 
 
 def load_local_env() -> None:
@@ -160,6 +193,22 @@ def indices_to_iccs(start_index: int, end_index: int) -> str:
     return f"{index_to_square(start_index)}-{index_to_square(end_index)}"
 
 
+def uci_to_indices(move: str) -> tuple[int, int]:
+    normalized = move.strip().lower()
+    if len(normalized) != 4:
+        raise ValueError(f"invalid UCI move: {move!r}")
+    return iccs_to_indices(f"{normalized[:2]}-{normalized[2:]}")
+
+
+def uci_to_iccs(move: str) -> str:
+    return indices_to_iccs(*uci_to_indices(move))
+
+
+def iccs_to_uci(move: str) -> str:
+    start, end = iccs_to_indices(move)
+    return indices_to_iccs(start, end).replace("-", "").lower()
+
+
 def apply_move(position: np.ndarray, start_index: int, end_index: int) -> np.ndarray:
     if position.shape != (CHANNELS, BOARD_ROWS, BOARD_COLS):
         raise ValueError(f"expected position shape {(CHANNELS, BOARD_ROWS, BOARD_COLS)}")
@@ -203,6 +252,33 @@ def encode_fen(fen: str) -> np.ndarray:
     if fields[1] == "w":
         board[14, :, :] = 1.0
     return board
+
+
+def position_to_fen(position: np.ndarray) -> str:
+    if position.shape != (CHANNELS, BOARD_ROWS, BOARD_COLS):
+        raise ValueError(f"expected position shape {(CHANNELS, BOARD_ROWS, BOARD_COLS)}")
+    ranks: list[str] = []
+    channel_to_piece = {channel: piece for piece, channel in PIECE_CHANNELS.items()}
+    for fen_row in range(BOARD_ROWS):
+        row = BOARD_ROWS - 1 - fen_row
+        empty = 0
+        tokens: list[str] = []
+        for column in range(BOARD_COLS):
+            channels = np.flatnonzero(position[:14, row, column])
+            if len(channels) == 0:
+                empty += 1
+                continue
+            if len(channels) != 1:
+                raise ValueError(f"invalid board encoding at row={row} col={column}")
+            if empty:
+                tokens.append(str(empty))
+                empty = 0
+            tokens.append(channel_to_piece[int(channels[0])])
+        if empty:
+            tokens.append(str(empty))
+        ranks.append("".join(tokens))
+    side = "w" if bool(position[14, 0, 0]) else "b"
+    return "/".join(ranks) + f" {side} - - 0 1"
 
 
 def validate_fen(fen: str) -> list[str]:

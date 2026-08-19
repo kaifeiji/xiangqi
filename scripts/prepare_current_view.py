@@ -8,13 +8,10 @@ from pathlib import Path
 
 import numpy as np
 
-from data_utils import encode_fen, iter_unified_games, split_for
+from data_utils import BLACK_WIN_RESULT, BOARD_COLS, BOARD_ROWS, DRAW_RESULT, RED_WIN_RESULT, VALID_GAME_RESULTS, current_view_index, current_view_position, encode_fen, iter_unified_games, split_for
 
 
-BOARD_COLS = 9
-BOARD_ROWS = 10
 SIDE_TO_MOVE_CHANNEL = 14
-VALID_RESULTS = {"1-0", "0-1", "1/2-1/2"}
 ICCS_COLUMNS = "ABCDEFGHI"
 
 
@@ -34,24 +31,6 @@ def fast_iccs_to_indices(move: str) -> tuple[int, int]:
         start_row_index * BOARD_COLS + ord(start_column) - ord("A"),
         end_row_index * BOARD_COLS + ord(end_column) - ord("A"),
     )
-
-
-def current_view_index(index: int) -> int:
-    """Map an ICCS board index after a 180-degree board rotation."""
-    return BOARD_ROWS * BOARD_COLS - 1 - index
-
-
-def current_view_position(position: np.ndarray, red_to_move: bool) -> np.ndarray:
-    """Put the side to move at the bottom and return the 14 model channels."""
-    if position.shape != (14, BOARD_ROWS, BOARD_COLS):
-        raise ValueError("expected position shape (14, 10, 9)")
-    if red_to_move:
-        return position[:14].copy()
-
-    transformed = np.empty((14, BOARD_ROWS, BOARD_COLS), dtype=position.dtype)
-    transformed[:7] = np.flip(position[7:14], axis=(1, 2))
-    transformed[7:14] = np.flip(position[:7], axis=(1, 2))
-    return transformed
 
 
 def apply_move_in_place(position: np.ndarray, start_index: int, end_index: int) -> None:
@@ -165,7 +144,7 @@ def export_records(records, output_dir: Path, max_games: int | None, shard_size:
             continue
         seen.add(game_id)
         result = str(record.get("result", "*"))
-        if result not in VALID_RESULTS:
+        if result not in VALID_GAME_RESULTS:
             counts["skipped_games"] += 1
             counts["encoding_errors"] += 1
             print(f"skip game {game_id}: unsupported game result: {result!r}", file=sys.stderr)
@@ -187,8 +166,8 @@ def export_records(records, output_dir: Path, max_games: int | None, shard_size:
                     buffer["end_indices"].append(current_view_index(end))
                 buffer["values"].append(
                     0.0
-                    if result == "1/2-1/2"
-                    else 1.0 if red_to_move == (result == "1-0") else -1.0
+                    if result == DRAW_RESULT
+                    else 1.0 if red_to_move == (result == RED_WIN_RESULT) else -1.0
                 )
                 apply_move_in_place(position, start, end)
                 red_to_move = not red_to_move
@@ -235,7 +214,12 @@ def main() -> int:
         parser.error("--shard-size must be positive")
     if not args.input_jsonl.is_file() and not args.input_jsonl.is_dir():
         parser.error(f"unified JSONL file or shard directory not found: {args.input_jsonl}")
-    return export_records(iter_unified_games(args.input_jsonl), args.output_dir, args.max_games, args.shard_size)
+    return export_records(
+        iter_unified_games(args.input_jsonl),
+        args.output_dir,
+        args.max_games,
+        args.shard_size,
+    )
 
 
 if __name__ == "__main__":

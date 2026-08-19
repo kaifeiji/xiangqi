@@ -2,12 +2,12 @@
 
 本项目面向消费级显卡训练中国象棋模型，使用人类棋局数据进行训练。
 
-项目包含数据准备、ResNet 模型训练、模型评估和棋规引擎。数据准备阶段将不同来源的人类棋局统一转换为局面、走法标签和可选的终局价值标签；训练阶段使用统一的棋盘张量训练 ResNet 模型。
+项目包含数据准备、ResNet 模型训练、Pikafish 蒸馏标签生成、模型评估和棋规引擎。数据准备阶段将不同来源的人类棋局统一转换为局面、走法标签和可选的终局价值标签；训练阶段使用统一的棋盘张量训练策略模型，也可以训练 value head。Web 服务支持普通模型推理、current-side-view、MCTS 和 Pikafish 对手。
 
 - Python 3.11/3.12
 - PyTorch 2.x
 - 输入张量：`(15, 10, 9)`
-- ResNet 模型：起点/终点策略 logits
+- ResNet 模型：起点/终点策略 logits，可选 value head
 
 ## 环境准备
 
@@ -15,6 +15,8 @@
 python -m pip install uv
 python -m uv sync
 ```
+
+本地 Pikafish 路径模板见 [`.env.example`](.env.example)。复制为 `.env.local` 后，将其中路径变量加载到当前 shell；脚本会自动读取仓库根目录的 `.env.local`。
 
 ## 启动
 
@@ -33,6 +35,8 @@ uv run xiangqi-play --dev
 ```
 
 开发模式访问 `http://127.0.0.1:5173`，后端 API 地址为 `http://127.0.0.1:8000`。
+
+Web 界面提供人机对弈、模型对弈和 JSON 存档回放。模型对弈支持自动/单步推进、模型选择、采样设置和可选的 MCTS 时间预算；人机模式支持悔棋和局面导航。
 
 ## 前端开发
 
@@ -55,7 +59,13 @@ uv run python -m backend.app --host 127.0.0.1 --port 8000
 
 ## 模型加载
 
-训练完成后，将模型 checkpoint 放入 `models/` 目录。支持 `.pt`、`.pth` 和 `.ckpt` 格式；启动服务后，模型即可被加载使用。
+训练完成后，将模型 checkpoint 放入 `models/` 目录或其子目录。服务会递归发现 `.pt`、`.pth` 和 `.ckpt` 文件，并在 Web 界面中使用相对路径作为模型 ID。训练脚本保存的 checkpoint 包含模型结构配置时，服务可以据此重建模型；不同的 value head 或 current-view 模型应在文件名或目录名中明确区分。
+
+Pikafish 不作为 PyTorch checkpoint 放入 `models/`，而是通过 `.env.local` 中的 `PIKAFISH_PATH` 和可选的 `PIKAFISH_NNUE_PATH` 配置。
+
+## 棋规与终局限制
+
+服务会处理将帅不存在、无合法走法、重复局面、长将、长捉、理论和棋以及自然限着。对局还设置 120 ply 的无吃子/无过河兵自然限着和 600 ply 的最大局长；具体结果会显示在对局状态中。
 
 ## 测试
 

@@ -9,15 +9,15 @@ from typing import Iterable
 
 import numpy as np
 
-from data_utils import apply_move, encode_fen, iccs_to_indices, iter_unified_games, split_for
+from data_utils import BLACK_WIN_RESULT, DRAW_RESULT, RED_WIN_RESULT, apply_move, encode_fen, iccs_to_indices, iter_unified_games, split_for
 
 
 def position_value(result: str, position: np.ndarray) -> float:
-    if result == "1/2-1/2":
+    if result == DRAW_RESULT:
         return 0.0
-    if result not in {"1-0", "0-1"}:
+    if result not in {RED_WIN_RESULT, BLACK_WIN_RESULT}:
         raise ValueError(f"unsupported game result: {result!r}")
-    return 1.0 if bool(position[14, 0, 0]) == (result == "1-0") else -1.0
+    return 1.0 if bool(position[14, 0, 0]) == (result == RED_WIN_RESULT) else -1.0
 
 
 def write_shard(dataset_dir: Path, split: str, index: int, buffer: dict[str, list[object]], counts: Counter[str]) -> None:

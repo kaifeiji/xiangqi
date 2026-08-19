@@ -17,11 +17,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from data_utils import apply_move, encode_fen, iccs_to_indices, indices_to_iccs, split_for, validate_fen
 from data_utils import EXCLUDED_GAMES
+from data_utils import VALID_OR_UNKNOWN_GAME_RESULTS
 from data_utils import iter_games
 
 LOGGER = logging.getLogger("unify_format")
 
-RESULTS = {"1-0", "0-1", "1/2-1/2", "*"}
+RESULTS = VALID_OR_UNKNOWN_GAME_RESULTS
 GLOBAL_INPUT_DIRS = ("全局", "比赛对局", "大师专集", "近代国手名局", "让子局", "未分类", "实战中局夺子取胜技巧150局")
 PIECE_TO_FEN = {0: "1", 1: "R", 2: "N", 3: "B", 4: "A", 5: "K", 6: "C", 7: "P", 8: "r", 9: "n", 10: "b", 11: "a", 12: "k", 13: "c", 14: "p"}
 CHAR_TO_FEN = set("RNBAKCP rnbakcp".replace(" ", ""))

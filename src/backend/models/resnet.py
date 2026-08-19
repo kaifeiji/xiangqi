@@ -28,13 +28,10 @@ class ResNet(nn.Module):
         channels: int = 64,
         blocks: int = 4,
         value_head: bool = False,
-        input_channels: int = 15,
     ) -> None:
         super().__init__()
-        if input_channels not in {14, 15}:
-            raise ValueError("input_channels must be 14 or 15")
         self.stem = nn.Sequential(
-            nn.Conv2d(input_channels, channels, kernel_size=3, padding=1, bias=False),
+            nn.Conv2d(15, channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(channels),
             nn.ReLU(inplace=True),
         )

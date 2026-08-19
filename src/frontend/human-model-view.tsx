@@ -208,9 +208,7 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
     const gameId = game.game_id
     try {
       await request(`/api/games/${gameId}/close`, { method: 'POST' })
-    } catch (endError) {
-      setError(endError instanceof Error ? endError.message : String(endError))
-      return
+    } catch {
     }
     setGame(undefined)
     setSnapshots([])
