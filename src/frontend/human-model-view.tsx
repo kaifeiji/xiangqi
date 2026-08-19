@@ -21,6 +21,7 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
   const [modelThinking, setModelThinking] = useState(false)
   const [startingGame, setStartingGame] = useState(false)
   const [pendingHumanMove, setPendingHumanMove] = useState(false)
+  const [mctsTimeSeconds, setMctsTimeSeconds] = useState(0)
   const [snapshots, setSnapshots] = useState<Game[]>([])
   const [position, setPosition] = useState(0)
   const announcedResult = useRef<string | undefined>(undefined)
@@ -77,7 +78,7 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
       setSnapshots([])
       setPosition(0)
       announcedResult.current = undefined
-      const payload = { mode: 'human-model', human_side: humanSide, model }
+      const payload = { mode: 'human-model', human_side: humanSide, model, mcts_time_seconds: mctsTimeSeconds }
       const nextGame = await request<Game>('/api/games', { method: 'POST', body: JSON.stringify(payload) })
       setGame(nextGame)
       setSnapshots([nextGame])
@@ -150,20 +151,12 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
     }
   })
 
-  const stepModel = useEffectEvent(async (delayRender = false) => {
+  const stepModel = useEffectEvent(async () => {
     if (!game) return
     try {
       setError('')
-      setModelThinking(delayRender)
-      const requestedAt = performance.now()
+      setModelThinking(true)
       const nextGame = await request<Game>(`/api/games/${game.game_id}/step`, { method: 'POST', body: '{}' })
-      if (delayRender) {
-        const elapsed = performance.now() - requestedAt
-        const remainingDelay = 1000 - elapsed
-        if (remainingDelay > 0) {
-          await new Promise<void>((resolve) => window.setTimeout(resolve, remainingDelay))
-        }
-      }
       updateGame(nextGame)
     } catch (stepError) {
       setError(stepError instanceof Error ? stepError.message : String(stepError))
@@ -174,7 +167,7 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
 
   useEffect(() => {
     if (!game || pendingHumanMove || game.is_human_turn || game.result) return
-    void stepModel(true)
+    void stepModel()
   }, [game?.game_id, game?.is_human_turn, game?.result, game?.turn, pendingHumanMove])
 
   useEffect(() => {
@@ -210,6 +203,23 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
     }
   })
 
+  const endGame = useEffectEvent(async () => {
+    if (!game || pendingHumanMove || modelThinking) return
+    const gameId = game.game_id
+    try {
+      await request(`/api/games/${gameId}/close`, { method: 'POST' })
+    } catch (endError) {
+      setError(endError instanceof Error ? endError.message : String(endError))
+      return
+    }
+    setGame(undefined)
+    setSnapshots([])
+    setPosition(0)
+    setLastMove(undefined)
+    announcedResult.current = undefined
+    setError('')
+  })
+
   const navigateReplay = useEffectEvent((index: number) => {
     if (index < 0 || index >= snapshots.length) return
     setPosition(index)
@@ -228,21 +238,32 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
         <aside className="controls" aria-label="人机设置">
           <label>
             人类执子
-            <select value={humanSide} onChange={(event) => setHumanSide(event.target.value as Side)} disabled={startingGame}>
+            <select value={humanSide} onChange={(event) => setHumanSide(event.target.value as Side)} disabled={startingGame || Boolean(game)}>
               <option value="w">红方</option>
               <option value="b">黑方</option>
             </select>
           </label>
           <label>
             {humanSide === 'w' ? '黑方模型' : '红方模型'}
-            <select value={model} onChange={(event) => setModel(event.target.value)} disabled={startingGame || !models.length}>
+            <select value={model} onChange={(event) => setModel(event.target.value)} disabled={startingGame || Boolean(game) || !models.length}>
               {models.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
             </select>
           </label>
-          <button type="button" onClick={() => void startGame()} disabled={startingGame || !modelsLoaded || !models.length}>
+          <label>
+            MCTS时间
+            <select value={String(mctsTimeSeconds)} onChange={(event) => setMctsTimeSeconds(Number(event.target.value))} disabled={startingGame || Boolean(game)}>
+              <option value="0">不加 MCTS</option>
+              <option value="1">1 秒</option>
+              <option value="3">3 秒</option>
+              <option value="5">5 秒</option>
+              <option value="10">10 秒</option>
+            </select>
+          </label>
+          {!game && <button type="button" onClick={() => void startGame()} disabled={startingGame || !modelsLoaded || !models.length}>
             {startingGame ? '创建中...' : '开始新对局'}
-          </button>
-          <button type="button" onClick={() => void undoMove()} disabled={!game || snapshots.length < 2 || pendingHumanMove || modelThinking}>
+          </button>}
+          {game && <button type="button" onClick={endGame} disabled={startingGame || pendingHumanMove || modelThinking}>认输</button>}
+          <button type="button" onClick={() => void undoMove()} disabled={!game || Boolean(game.result) || snapshots.length < 2 || pendingHumanMove || modelThinking}>
             悔棋
           </button>
         </aside>

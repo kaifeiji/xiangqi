@@ -23,7 +23,7 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
   const [startingGame, setStartingGame] = useState(false)
   const [thinking, setThinking] = useState(false)
   const [autoPlay, setAutoPlay] = useState(true)
-  const [stepDelayMs, setStepDelayMs] = useState(1000)
+  const [mctsTimeSeconds, setMctsTimeSeconds] = useState(0)
   const announcedResult = useRef<string | undefined>(undefined)
 
   useEffect(() => {
@@ -59,7 +59,7 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
       announcedResult.current = undefined
       const nextGame = await request<Game>('/api/games', {
         method: 'POST',
-        body: JSON.stringify({ mode: 'model-model', red_model: redModel, black_model: blackModel }),
+        body: JSON.stringify({ mode: 'model-model', red_model: redModel, black_model: blackModel, mcts_time_seconds: mctsTimeSeconds }),
       })
       setGame(nextGame)
       setSnapshots([nextGame])
@@ -70,18 +70,30 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
     }
   })
 
+  const endGame = useEffectEvent(async () => {
+    if (!game || thinking) return
+    const gameId = game.game_id
+    try {
+      await request(`/api/games/${gameId}/close`, { method: 'POST' })
+    } catch (endError) {
+      setError(endError instanceof Error ? endError.message : String(endError))
+      return
+    }
+    setAutoPlay(false)
+    setGame(undefined)
+    setSnapshots([])
+    setPosition(0)
+    setLastMove(undefined)
+    announcedResult.current = undefined
+    setError('')
+  })
+
   const stepModel = useEffectEvent(async () => {
     if (!game || game.result || thinking) return
     try {
       setError('')
       setThinking(true)
-      const requestedAt = performance.now()
       const nextGame = await request<Game>(`/api/games/${game.game_id}/step`, { method: 'POST', body: '{}' })
-      const elapsed = performance.now() - requestedAt
-      const remainingDelay = stepDelayMs - elapsed
-      if (remainingDelay > 0) {
-        await new Promise<void>((resolve) => window.setTimeout(resolve, remainingDelay))
-      }
       updateGame(nextGame)
     } catch (stepError) {
       setError(stepError instanceof Error ? stepError.message : String(stepError))
@@ -123,27 +135,30 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
         <aside className="controls" aria-label="模型对弈设置">
           <label>
             红方模型
-            <select value={redModel} onChange={(event) => setRedModel(event.target.value)} disabled={startingGame || !models.length}>
+            <select value={redModel} onChange={(event) => setRedModel(event.target.value)} disabled={startingGame || Boolean(game) || !models.length}>
               {models.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
             </select>
           </label>
           <label>
             黑方模型
-            <select value={blackModel} onChange={(event) => setBlackModel(event.target.value)} disabled={startingGame || !models.length}>
+            <select value={blackModel} onChange={(event) => setBlackModel(event.target.value)} disabled={startingGame || Boolean(game) || !models.length}>
               {models.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
             </select>
           </label>
           <label>
-            模型延迟
-            <select value={String(stepDelayMs)} onChange={(event) => setStepDelayMs(Number(event.target.value))}>
-              <option value="0">无延迟</option>
-              <option value="1000">延迟 1 秒</option>
-              <option value="3000">延迟 3 秒</option>
+            MCTS时间
+            <select value={String(mctsTimeSeconds)} onChange={(event) => setMctsTimeSeconds(Number(event.target.value))} disabled={startingGame || Boolean(game)}>
+              <option value="0">不加 MCTS</option>
+              <option value="1">1 秒</option>
+              <option value="3">3 秒</option>
+              <option value="5">5 秒</option>
+              <option value="10">10 秒</option>
             </select>
           </label>
-          <button type="button" onClick={() => void startGame()} disabled={startingGame || !modelsLoaded || !models.length}>
+          {!game && <button type="button" onClick={() => void startGame()} disabled={startingGame || !modelsLoaded || !models.length}>
             {startingGame ? '创建中...' : '开始新对局'}
-          </button>
+          </button>}
+          {game && <button type="button" onClick={endGame} disabled={startingGame || thinking}>结束对局</button>}
           {game && !game.result && <button id="step-button" type="button" onClick={() => setAutoPlay((enabled) => !enabled)}>{autoPlay ? '暂停' : '继续'}</button>}
         </aside>
         <MoveRecord

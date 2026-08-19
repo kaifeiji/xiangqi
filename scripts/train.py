@@ -190,7 +190,14 @@ def append_metrics(path: Path, metrics: dict[str, object]) -> None:
         stream.write(json.dumps(metrics, ensure_ascii=False) + "\n")
 
 
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, limit: int | None, value_head: bool = False) -> dict[str, float]:
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    limit: int | None,
+    value_head: bool = False,
+    amp_enabled: bool = False,
+) -> dict[str, float]:
     model.eval()
     criterion = nn.CrossEntropyLoss()
     total_loss = 0.0
@@ -207,7 +214,8 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, limit: 
             positions = positions.to(device, non_blocking=True)
             starts = starts.to(device, non_blocking=True)
             ends = ends.to(device, non_blocking=True)
-            outputs = model(positions)
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
+                outputs = model(positions)
             start_logits, end_logits = outputs[:2]
             policy_loss = criterion(start_logits, starts) + criterion(end_logits, ends)
             loss = policy_loss
@@ -254,8 +262,8 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device, limit: 
         value_mean = value_sum / denominator
         prediction_mean = prediction_sum / denominator
         covariance = prediction_value_sum / denominator - prediction_mean * value_mean
-        value_variance = value_squared_sum / denominator - value_mean * value_mean
-        prediction_variance = prediction_squared_sum / denominator - prediction_mean * prediction_mean
+        value_variance = max(value_squared_sum / denominator - value_mean * value_mean, 0.0)
+        prediction_variance = max(prediction_squared_sum / denominator - prediction_mean * prediction_mean, 0.0)
         denominator_correlation = (value_variance * prediction_variance) ** 0.5
         metrics.update({
             "value_loss": total_value_loss / denominator,
@@ -275,17 +283,25 @@ def main() -> int:
     parser.add_argument("--learning-rate", type=float, default=0.001)
     parser.add_argument("--channels", type=int, default=64)
     parser.add_argument("--blocks", type=int, default=4)
+    parser.add_argument("--current-view", action="store_true", help="train with 14-channel current-side-view inputs")
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--prefetch-factor", type=int, default=4, help="batches prefetched per DataLoader worker")
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--mirror", action="store_true")
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True, help="use CUDA mixed precision")
     parser.add_argument("--value-head", action="store_true", help="train a new model with a supervised value head")
     parser.add_argument("--resume", type=Path, help="resume from a saved checkpoint")
     args = parser.parse_args()
+    if args.prefetch_factor < 1:
+        parser.error("--prefetch-factor must be positive")
 
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    amp_enabled = bool(args.amp and device.type == "cuda")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
     train_shards = find_shards(args.data_dir, "train")
     validation_shards = find_shards(args.data_dir, "validation")
     test_shards = find_shards(args.data_dir, "test")
@@ -296,29 +312,38 @@ def main() -> int:
     train_dataset = ShardDataset(train_shards, args.batch_size, worker_count, args.value_head)
     validation_dataset = ShardDataset(validation_shards, args.batch_size, worker_count, args.value_head)
     train_dataset.set_training(True)
+    loader_options = {
+        "batch_size": None,
+        "num_workers": args.num_workers,
+        "pin_memory": device.type == "cuda",
+        "persistent_workers": args.num_workers > 0,
+    }
+    if args.num_workers > 0:
+        loader_options["prefetch_factor"] = args.prefetch_factor
     train_loader = DataLoader(
         train_dataset,
-        batch_size=None,
-        num_workers=args.num_workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=args.num_workers > 0,
+        **loader_options,
     )
     validation_loader = DataLoader(
         validation_dataset,
-        batch_size=None,
         shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=args.num_workers > 0,
+        **loader_options,
     )
 
-    model = ResNet(channels=args.channels, blocks=args.blocks, value_head=args.value_head).to(device)
+    input_channels = 14 if args.current_view else 15
+    model = ResNet(
+        channels=args.channels,
+        blocks=args.blocks,
+        value_head=args.value_head,
+        input_channels=input_channels,
+    ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     updates_per_epoch = max(1, (len(train_loader) + args.accumulation_steps - 1) // args.accumulation_steps)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs * updates_per_epoch
     )
     criterion = nn.CrossEntropyLoss()
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     best_validation_loss = float("inf")
     epochs_without_improvement = 0
@@ -330,6 +355,8 @@ def main() -> int:
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
+        if "scaler" in checkpoint:
+            scaler.load_state_dict(checkpoint["scaler"])
         start_epoch = int(checkpoint["epoch"])
         global_step = int(checkpoint["global_step"])
         best_validation_loss = float(checkpoint.get("best_validation_loss", checkpoint["validation_loss"]))
@@ -347,6 +374,7 @@ def main() -> int:
         "validation_samples": validation_dataset.sample_count(),
         "batch_size": args.batch_size,
         "accumulation_steps": args.accumulation_steps,
+        "amp": amp_enabled,
         "parameters": sum(parameter.numel() for parameter in model.parameters()),
     }, ensure_ascii=False))
 
@@ -368,28 +396,33 @@ def main() -> int:
                 positions = torch.flip(positions, dims=[3])
                 starts = (starts // positions.shape[3]) * positions.shape[3] + (positions.shape[3] - 1 - starts % positions.shape[3])
                 ends = (ends // positions.shape[3]) * positions.shape[3] + (positions.shape[3] - 1 - ends % positions.shape[3])
-            outputs = model(positions)
-            start_logits, end_logits = outputs[:2]
-            policy_loss = criterion(start_logits, starts) + criterion(end_logits, ends)
-            batch_loss = policy_loss
-            value_loss = None
-            if args.value_head:
-                values = batch[3].to(device, non_blocking=True)
-                value_loss = nn.functional.mse_loss(outputs[2].reshape(-1), values.reshape(-1))
-                batch_loss = batch_loss + 0.5 * value_loss
+            with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
+                outputs = model(positions)
+                start_logits, end_logits = outputs[:2]
+                policy_loss = criterion(start_logits, starts) + criterion(end_logits, ends)
+                batch_loss = policy_loss
+                value_loss = None
+                if args.value_head:
+                    values = batch[3].to(device, non_blocking=True)
+                    value_loss = nn.functional.mse_loss(outputs[2].reshape(-1), values.reshape(-1))
+                    batch_loss = batch_loss + 0.5 * value_loss
             training_loss_total += batch_loss.item() * len(positions)
             training_policy_loss_total += policy_loss.item() * len(positions)
             if value_loss is not None:
                 training_value_loss_total += value_loss.item() * len(positions)
             training_samples += len(positions)
             loss = batch_loss / args.accumulation_steps
-            loss.backward()
+            scaler.scale(loss).backward()
             should_update = (batch_index + 1) % args.accumulation_steps == 0 or batch_index + 1 == len(train_loader)
             if should_update:
-                optimizer.step()
-                scheduler.step()
+                previous_scale = scaler.get_scale()
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer_step_applied = scaler.get_scale() >= previous_scale
+                if optimizer_step_applied:
+                    scheduler.step()
+                    global_step += 1
                 optimizer.zero_grad(set_to_none=True)
-                global_step += 1
             completed_batches = batch_index + 1
             if completed_batches == 1 or completed_batches % 100 == 0 or completed_batches == epoch_batches:
                 elapsed = time.perf_counter() - epoch_started
@@ -398,7 +431,14 @@ def main() -> int:
                 eta_seconds = remaining / batches_per_second if batches_per_second else 0.0
                 memory = ""
                 if device.type == "cuda":
-                    memory = f" gpu_mem={torch.cuda.memory_allocated(device) / 1024**3:.2f}GiB"
+                    allocated = torch.cuda.memory_allocated(device) / 1024**3
+                    reserved = torch.cuda.memory_reserved(device) / 1024**3
+                    max_allocated = torch.cuda.max_memory_allocated(device) / 1024**3
+                    memory = (
+                        f" gpu_mem={allocated:.2f}GiB"
+                        f" reserved={reserved:.2f}GiB"
+                        f" max={max_allocated:.2f}GiB"
+                    )
                 print(
                     f"epoch={epoch + 1}/{args.epochs} "
                     f"batch={completed_batches}/{epoch_batches} "
@@ -416,6 +456,7 @@ def main() -> int:
             device,
             limit=50 if args.max_steps else None,
             value_head=args.value_head,
+            amp_enabled=amp_enabled,
         )
         validation_loss = validation_metrics["loss"]
         improved = validation_loss < best_validation_loss
@@ -428,13 +469,18 @@ def main() -> int:
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
+            "scaler": scaler.state_dict(),
             "epoch": epoch + 1,
             "global_step": global_step,
             "validation_loss": validation_loss,
             "validation_metrics": validation_metrics,
             "best_validation_loss": best_validation_loss,
             "epochs_without_improvement": epochs_without_improvement,
-            "config": vars(args),
+            "config": {
+                **vars(args),
+                "input_channels": input_channels,
+                "current_view": args.current_view,
+            },
         }
         torch.save(checkpoint, args.checkpoint_dir / "last.pt")
         if improved:
@@ -461,10 +507,7 @@ def main() -> int:
     test_dataset = ShardDataset(test_shards, args.batch_size, worker_count, args.value_head)
     test_loader = DataLoader(
         test_dataset,
-        batch_size=None,
-        num_workers=args.num_workers,
-        pin_memory=device.type == "cuda",
-        persistent_workers=args.num_workers > 0,
+        **loader_options,
     )
     test_metrics = evaluate(
         model,

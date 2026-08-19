@@ -33,6 +33,8 @@ MODEL_SUFFIXES = {".ckpt", ".pt", ".pth"}
 PIKAFISH_MODEL_ID = "pikafish"
 NATURAL_LIMIT_PLIES = 120
 MAX_PLIES = 600
+GAME_IDLE_TIMEOUT_SECONDS = 600.0
+GAME_CLEANUP_INTERVAL_SECONDS = 60.0
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 MODELS_DIR = PROJECT_DIR / "models"
 WEB_CLIENT_DIR = PROJECT_DIR
@@ -57,6 +59,7 @@ class WebGame:
     checking_sides: list[str | None] = field(default_factory=list)
     mover_sides: list[str] = field(default_factory=list)
     chasing_targets: list[set[tuple[int, int, str]]] = field(default_factory=list)
+    last_accessed_at: float = field(default_factory=time.monotonic)
 
 
 def _evaluate_result(
@@ -166,7 +169,7 @@ def _rebuild_game_state(game: WebGame) -> None:
 
 
 def _undo_last_plies(game: WebGame, plies: int) -> bool:
-    if plies < 1 or not game.move_history:
+    if game.result is not None or plies < 1 or not game.move_history:
         return False
     keep_moves = max(len(game.move_history) - plies, 0)
     game.move_history = game.move_history[:keep_moves]
@@ -262,6 +265,23 @@ def create_app(dev_web_url: str | None = None) -> Flask:
     app = Flask(__name__)
     games: dict[str, WebGame] = {}
     lock = threading.Lock()
+
+    def cleanup_games() -> None:
+        while True:
+            time.sleep(GAME_CLEANUP_INTERVAL_SECONDS)
+            cutoff = time.monotonic() - GAME_IDLE_TIMEOUT_SECONDS
+            with lock:
+                stale_ids = [
+                    game_id
+                    for game_id, game in games.items()
+                    if game.last_accessed_at < cutoff
+                ]
+                for game_id in stale_ids:
+                    games.pop(game_id, None)
+            if stale_ids:
+                app.logger.info("cleaned up %d idle games", len(stale_ids))
+
+    threading.Thread(target=cleanup_games, name="game-cleanup", daemon=True).start()
     preferred_device = "cpu"
     try:
         import torch
@@ -272,7 +292,13 @@ def create_app(dev_web_url: str | None = None) -> Flask:
         preferred_device = "cpu"
     app.logger.info("model inference device: %s", preferred_device)
 
-    def create_model(name: str, model_id: Any, *, sample_moves: bool = False) -> Any:
+    def create_model(
+        name: str,
+        model_id: Any,
+        *,
+        sample_moves: bool = False,
+        mcts_time_seconds: float = 0.0,
+    ) -> Any:
         from backend.game.players import ModelPlayer, PikafishPlayer
 
         if model_id == PIKAFISH_MODEL_ID:
@@ -283,6 +309,7 @@ def create_app(dev_web_url: str | None = None) -> Flask:
             checkpoint=_resolve_model(model_id),
             device=preferred_device,
             sampling_temperature=0.3 if sample_moves else None,
+            mcts_time_seconds=mcts_time_seconds,
         )
 
     @app.get("/api/models")
@@ -300,6 +327,12 @@ def create_app(dev_web_url: str | None = None) -> Flask:
         model = payload.get("model")
         red_model = payload.get("red_model")
         black_model = payload.get("black_model")
+        try:
+            mcts_time_seconds = float(payload.get("mcts_time_seconds", 0.0))
+        except (TypeError, ValueError):
+            return jsonify({"error": "mcts_time_seconds must be a number"}), 400
+        if mcts_time_seconds not in {0.0, 1.0, 3.0, 5.0, 10.0}:
+            return jsonify({"error": "mcts_time_seconds must be one of 0, 1, 3, 5, 10"}), 400
 
         try:
             position = parse_fen(fen)
@@ -310,12 +343,12 @@ def create_app(dev_web_url: str | None = None) -> Flask:
                 model_side = "b" if human_side == "w" else "w"
                 players = {
                     human_side: None,
-                    model_side: create_model("Model", model),
+                    model_side: create_model("Model", model, mcts_time_seconds=mcts_time_seconds),
                 }
             else:
                 players = {
-                    "w": create_model("RedModel", red_model, sample_moves=True),
-                    "b": create_model("BlackModel", black_model, sample_moves=True),
+                    "w": create_model("RedModel", red_model, sample_moves=True, mcts_time_seconds=mcts_time_seconds),
+                    "b": create_model("BlackModel", black_model, sample_moves=True, mcts_time_seconds=mcts_time_seconds),
                 }
                 human_side = None
         except Exception as error:
@@ -340,6 +373,8 @@ def create_app(dev_web_url: str | None = None) -> Flask:
     def get_game(game_id: str) -> Any:
         with lock:
             game = games.get(game_id)
+            if game is not None:
+                game.last_accessed_at = time.monotonic()
         if game is None:
             return jsonify({"error": "game not found"}), 404
         return jsonify(_serialize_game(game))
@@ -355,6 +390,7 @@ def create_app(dev_web_url: str | None = None) -> Flask:
             game = games.get(game_id)
             if game is None:
                 return jsonify({"error": "game not found"}), 404
+            game.last_accessed_at = time.monotonic()
             if game.result is not None:
                 return jsonify({"error": "game already finished"}), 400
             side = game.position.side_to_move
@@ -379,6 +415,7 @@ def create_app(dev_web_url: str | None = None) -> Flask:
             game = games.get(game_id)
             if game is None:
                 return jsonify({"error": "game not found"}), 404
+            game.last_accessed_at = time.monotonic()
             if game.result is not None:
                 return jsonify({"error": "game already finished"}), 400
             if not _is_model_turn(game):
@@ -422,11 +459,22 @@ def create_app(dev_web_url: str | None = None) -> Flask:
             game = games.get(game_id)
             if game is None:
                 return jsonify({"error": "game not found"}), 404
+            game.last_accessed_at = time.monotonic()
             if game.mode != "human-model":
                 return jsonify({"error": "undo is only supported in human-model mode"}), 400
+            if game.result is not None:
+                return jsonify({"error": "game is already finished; undo is not allowed"}), 400
             if not _undo_last_plies(game, plies):
                 return jsonify({"error": "no moves to undo"}), 400
             return jsonify(_serialize_game(game))
+
+    @app.post("/api/games/<game_id>/close")
+    def close_game(game_id: str) -> Any:
+        with lock:
+            game = games.pop(game_id, None)
+        if game is None:
+            return jsonify({"error": "game not found"}), 404
+        return jsonify({"closed": True, "game_id": game_id})
 
     @app.get("/")
     @app.get("/<path:asset_path>")
