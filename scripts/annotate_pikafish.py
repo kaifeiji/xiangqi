@@ -283,6 +283,12 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def format_progress_log(**fields: object) -> str:
+    parts = ["[progress]"]
+    parts.extend(f"{key}={value}" for key, value in fields.items())
+    return "\t".join(parts)
+
+
 @contextlib.contextmanager
 def locked_shard_log(output_dir: Path):
     lock_path = output_dir / SHARD_LOG_LOCK_NAME
@@ -488,6 +494,7 @@ def annotate_source(
     position_timeout_seconds: float = 5.0,
 ) -> Counter[str]:
     counts: Counter[str] = Counter()
+    progress_log_interval_seconds = 5.0
     completed_games, shard_index, shard_positions, records_path = prepare_output(
         source,
         output_dir,
@@ -502,6 +509,30 @@ def annotate_source(
         f"[start] source={source.name} resume_completed_games={len(completed_games)} shard_index={shard_index} shard_positions={shard_positions}",
         flush=True,
     )
+    progress_started_at = time.monotonic()
+    next_progress_log_at = progress_started_at + progress_log_interval_seconds
+
+    def maybe_log_progress(*, force: bool = False) -> None:
+        nonlocal next_progress_log_at
+        now = time.monotonic()
+        if not force and now < next_progress_log_at:
+            return
+        elapsed_seconds = now - progress_started_at
+        print(
+            format_progress_log(
+                source=source.name,
+                processed=len(completed_games) + counts["invalid_games"],
+                valid=len(completed_games),
+                invalid=counts["invalid_games"],
+                shard_index=f"{shard_index:03d}",
+                shard_positions=shard_positions,
+                total_positions=total_positions,
+                elapsed_s=f"{elapsed_seconds:.1f}",
+            ),
+            flush=True,
+        )
+        next_progress_log_at = now + progress_log_interval_seconds
+
     with PikafishAnnotator(
         find_pikafish(),
         depth=depth,
@@ -512,7 +543,6 @@ def annotate_source(
         hash_mb=hash_mb,
         position_timeout_seconds=position_timeout_seconds,
     ) as annotator:
-        annotate_position = annotator.annotate
         dump_json = json.dumps
         games = iter(iter_unified_games(source))
         output = None
@@ -528,6 +558,7 @@ def annotate_source(
             raw_moves = game.get("moves")
             if isinstance(game_id, str) and game_id in completed_games:
                 counts["skipped_games"] += 1
+                maybe_log_progress()
                 continue
             if not isinstance(game_id, str) or not isinstance(fen, str) or not isinstance(raw_moves, list):
                 counts["invalid_games"] += 1
@@ -535,6 +566,7 @@ def annotate_source(
                     f"[fail] source={source.name} game_index={source_game_index} reason=invalid-game-record processed={len(completed_games) + counts['invalid_games']} valid={len(completed_games)} invalid={counts['invalid_games']}",
                     flush=True,
                 )
+                maybe_log_progress()
                 continue
             try:
                 moves = [iccs_to_indices(str(move)) for move in raw_moves]
@@ -545,7 +577,7 @@ def annotate_source(
                     current_fen = position_to_fen(position)
                     try:
                         teacher = build_teacher(
-                            annotate_position(current_fen),
+                            annotator.annotate(current_fen),
                             requested_multipv=multipv,
                         )
                     except (KeyError, TypeError, ValueError, IndexError, RuntimeError) as error:
@@ -567,6 +599,7 @@ def annotate_source(
                         f"[fail] source={source.name} game_index={source_game_index} reason=no-samples processed={len(completed_games) + counts['invalid_games']} valid={len(completed_games)} invalid={counts['invalid_games']}",
                         flush=True,
                     )
+                    maybe_log_progress()
                     continue
                 if shard_positions >= shard_size:
                     if output is not None:
@@ -592,16 +625,14 @@ def annotate_source(
                 counts["positions"] += len(samples)
                 counts["valid_games"] += 1
                 completed_games.add(game_id)
-                print(
-                    f"[ok] source={source.name} game_index={source_game_index} moves={len(samples)} processed={len(completed_games) + counts['invalid_games']} valid={len(completed_games)} invalid={counts['invalid_games']} shard_positions={shard_positions} total_positions={total_positions}",
-                    flush=True,
-                )
+                maybe_log_progress()
             except (KeyError, TypeError, ValueError, IndexError, RuntimeError) as error:
                 counts["invalid_games"] += 1
                 print(
                     f"[fail] source={source.name} game_index={source_game_index} reason={error} processed={len(completed_games) + counts['invalid_games']} valid={len(completed_games)} invalid={counts['invalid_games']}",
                     flush=True,
                 )
+                maybe_log_progress()
         if output is not None:
             output.close()
             if shard_positions > 0:
@@ -620,6 +651,7 @@ def annotate_source(
             )
             log_shard_completed(output_dir, source, records_path, shard_positions)
             compress_shard(records_path)
+        maybe_log_progress(force=True)
     counts["processed_games"] = len(completed_games) + counts["invalid_games"]
     counts["valid_games"] = len(completed_games)
     counts["total_positions"] = total_positions
