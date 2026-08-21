@@ -132,6 +132,30 @@ uv run python scripts\prepare_current_view.py `
 
 ## Pikafish 蒸馏
 
+### Pikafish CPU 内置 benchmark
+
+`benchmark_pikafish.py` 仅调用引擎内置 `bench`，不读取任何棋局数据。脚本会自动：
+
+- 从 `.env.local` 读取 `PIKAFISH_PATH` 和 `PIKAFISH_NNUE_PATH`
+- 默认扫描 `PIKAFISH_PATH` 同目录下所有 `pikafish-*.exe`
+- 对每个引擎执行 `uci -> setoption EvalFile -> isready -> bench -> quit`
+- 输出每个引擎的 JSON 结果（`nps`、`totalNodes`、`elapsed`、`exitCode`）
+- 输出按 `nps` 排序的 `rankingByNps` 和 `recommendedDefaultEngine`
+
+运行全部可见 CPU 版本：
+
+```powershell
+uv run python scripts\benchmark_pikafish.py
+```
+
+只测试指定引擎：
+
+```powershell
+uv run python scripts\benchmark_pikafish.py --engine C:\workspace\Pikafish.2026-01-02\Windows\pikafish-avx2.exe
+```
+
+如果某些二进制与当前 CPU 指令集不兼容（例如 AVX512/VNNI 机型不匹配），脚本会将其标记为 `compatible=false` 并继续测试其他版本。
+
 `annotate_pikafish.py` 只读取统一 JSONL，不直接解析 PGN 或 XQF。它对每个存在人类走法的局面执行 Pikafish MultiPV 搜索，并写入 canonical JSONL。标注阶段不生成 NPY；后续按所需训练配置使用数据准备脚本生成 NPY。
 
 ```powershell
@@ -169,9 +193,9 @@ MultiPV 分差可作为裁剪后的 policy 难度权重。PV2/PV3 不混入 PV1 
 先分别对各 split 跑 1 局 smoke：
 
 ```powershell
-uv run python scripts\annotate_pikafish.py --input-jsonl data\processed\human_games\train-000.jsonl --output-dir data\processed\pikafish-smoke-train-1 --depth 10 --multipv 5 --max-games 1
-uv run python scripts\annotate_pikafish.py --input-jsonl data\processed\human_games\validation-000.jsonl --output-dir data\processed\pikafish-smoke-validation-1 --depth 10 --multipv 5 --max-games 1
-uv run python scripts\annotate_pikafish.py --input-jsonl data\processed\human_games\test-000.jsonl --output-dir data\processed\pikafish-smoke-test-1 --depth 10 --multipv 5 --max-games 1
+uv run python scripts\annotate_pikafish.py --input-jsonl data\processed\human_games\train-000.jsonl --output-dir data\processed\pikafish-smoke-train-1 --depth 10 --multipv 5
+uv run python scripts\annotate_pikafish.py --input-jsonl data\processed\human_games\validation-000.jsonl --output-dir data\processed\pikafish-smoke-validation-1 --depth 10 --multipv 5
+uv run python scripts\annotate_pikafish.py --input-jsonl data\processed\human_games\test-000.jsonl --output-dir data\processed\pikafish-smoke-test-1 --depth 10 --multipv 5
 ```
 
-确认三次运行零失败、PV 回放和恢复语义正确后，再将每个命令的 `--max-games` 改为 `10`，并添加 `--resume`。
+确认三次运行零失败、PV 回放和恢复语义正确后，再为每个命令添加 `--resume`。

@@ -63,6 +63,14 @@ uv run python -m backend.app --host 127.0.0.1 --port 8000
 
 Pikafish 不作为 PyTorch checkpoint 放入 `models/`，而是通过 `.env.local` 中的 `PIKAFISH_PATH` 和可选的 `PIKAFISH_NNUE_PATH` 配置。
 
+内置引擎基准（不依赖棋局数据）可直接运行：
+
+```powershell
+uv run python scripts\benchmark_pikafish.py
+```
+
+该脚本会比较同目录 `pikafish-*.exe` 的 `bench` 结果，并输出按 `nps` 排序的推荐 CPU 版本。
+
 ## 棋规与终局限制
 
 服务会处理将帅不存在、无合法走法、重复局面、长将、长捉、理论和棋以及自然限着。对局还设置 120 ply 的无吃子/无过河兵自然限着和 600 ply 的最大局长；具体结果会显示在对局状态中。

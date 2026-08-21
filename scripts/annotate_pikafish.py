@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,7 +72,9 @@ def build_teacher(annotation: dict[str, object], *, requested_multipv: int) -> d
     if not isinstance(variations, list) or not isinstance(bestmove, str):
         raise ValueError("Pikafish annotation is missing variations or bestmove")
 
+    bestmove_iccs = uci_to_iccs(bestmove)
     candidates: list[dict[str, object]] = []
+    primary_candidate: dict[str, object] | None = None
     for expected_rank, variation in enumerate(variations, start=1):
         if not isinstance(variation, dict):
             raise ValueError("invalid Pikafish variation")
@@ -82,7 +85,9 @@ def build_teacher(annotation: dict[str, object], *, requested_multipv: int) -> d
         if rank != expected_rank or score_kind not in {"cp", "mate"} or not isinstance(score, (int, float)):
             raise ValueError("Pikafish variations must have contiguous ranks and raw scores")
         if not isinstance(pv, list) or not pv or not all(isinstance(move, str) for move in pv):
-            raise ValueError("Pikafish variation is missing a principal variation")
+            if expected_rank == 1:
+                raise ValueError("Pikafish variation is missing a principal variation")
+            continue
         candidate: dict[str, object] = {
             "rank": rank,
             "move": uci_to_iccs(pv[0]),
@@ -93,14 +98,18 @@ def build_teacher(annotation: dict[str, object], *, requested_multipv: int) -> d
         }
         if requested_multipv > 1:
             candidate["pv"] = [uci_to_iccs(move) for move in pv]
+        if expected_rank == 1:
+            primary_candidate = candidate
         candidates.append(candidate)
 
-    if not candidates or candidates[0]["move"] != uci_to_iccs(bestmove):
+    if primary_candidate is None:
+        raise ValueError("Pikafish variation is missing a principal variation")
+    if primary_candidate["move"] != bestmove_iccs:
         raise ValueError("Pikafish PV1 does not match bestmove")
     return {
-        "score_kind": candidates[0]["score_kind"],
-        "score": candidates[0]["score"],
-        "bestmove": candidates[0]["move"],
+        "score_kind": primary_candidate["score_kind"],
+        "score": primary_candidate["score"],
+        "bestmove": primary_candidate["move"],
         "requested_multipv": requested_multipv,
         "returned_multipv": len(candidates),
         "candidates": candidates,
@@ -118,6 +127,7 @@ class PikafishAnnotator:
         threads: int,
         multipv: int,
         hash_mb: int | None,
+        position_timeout_seconds: float = 5.0,
     ) -> None:
         if sum(value is not None for value in (depth, movetime_ms, nodes)) != 1:
             raise ValueError("choose exactly one of --depth, --movetime-ms or --nodes")
@@ -128,6 +138,7 @@ class PikafishAnnotator:
         self.threads = threads
         self.multipv = multipv
         self.hash_mb = hash_mb
+        self.position_timeout_seconds = position_timeout_seconds
         self.process: subprocess.Popen[str] | None = None
         self.lines: queue.SimpleQueue[str | None] = queue.SimpleQueue()
 
@@ -166,6 +177,11 @@ class PikafishAnnotator:
             except (OSError, subprocess.TimeoutExpired):
                 self.process.kill()
 
+    def restart(self) -> None:
+        self.__exit__(None, None, None)
+        self.lines = queue.SimpleQueue()
+        self.__enter__()
+
     def _read(self) -> None:
         assert self.process is not None and self.process.stdout is not None
         for line in self.process.stdout:
@@ -180,7 +196,10 @@ class PikafishAnnotator:
 
     def _wait_for(self, expected: str) -> None:
         while True:
-            line = self.lines.get(timeout=30)
+            try:
+                line = self.lines.get(timeout=30)
+            except queue.Empty as error:
+                raise RuntimeError(f"Pikafish timed out waiting for {expected}") from error
             if line is None:
                 raise RuntimeError("Pikafish exited unexpectedly")
             if line == expected or line.startswith(expected + " "):
@@ -197,8 +216,18 @@ class PikafishAnnotator:
         )
         self._send("go " + budget)
         variations: dict[int, dict[str, object]] = {}
+        deadline = time.monotonic() + self.position_timeout_seconds
         while True:
-            line = self.lines.get(timeout=120)
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise queue.Empty
+                line = self.lines.get(timeout=remaining)
+            except queue.Empty as error:
+                self.restart()
+                raise RuntimeError(
+                    f"Pikafish timed out waiting for bestmove after {self.position_timeout_seconds:g}s"
+                ) from error
             if line is None:
                 raise RuntimeError("Pikafish exited during annotation")
             if line.startswith("info "):
@@ -231,9 +260,19 @@ def input_paths(path: Path) -> list[Path]:
     ]
 
 
-def output_path_for(source: Path, input_jsonl: Path, output_dir: Path, index: int) -> Path:
-    name = "annotated_positions" if input_jsonl.is_file() else source.stem
-    return output_dir / f"{name}-{index:03d}.jsonl"
+def prioritize_sources_for_resume(sources: list[Path], output_dir: Path, *, resume: bool) -> list[Path]:
+    if not resume:
+        return sources
+
+    def has_incomplete_raw_shard(source: Path) -> bool:
+        return any(path.suffix == ".jsonl" for _, path in output_shards_for(source, output_dir))
+
+    # Resume mode: sources with unfinished raw shards should be scheduled first.
+    return sorted(sources, key=lambda source: (not has_incomplete_raw_shard(source), source.name))
+
+
+def output_path_for(source: Path, output_dir: Path, index: int) -> Path:
+    return output_dir / f"{source.stem}-{index:03d}.jsonl"
 
 
 def compressed_path_for(path: Path) -> Path:
@@ -281,12 +320,7 @@ def write_shard_log(path: Path, records: list[dict[str, object]]) -> None:
     temporary_path.replace(path)
 
 
-def shard_has_started_log(output_dir: Path, path: Path) -> bool:
-    with locked_shard_log(output_dir) as log_path:
-        return any(record.get("shard") == path.name for record in read_shard_log(log_path))
-
-
-def log_shard_started(output_dir: Path, source: Path, path: Path) -> None:
+def ensure_shard_started(output_dir: Path, source: Path, path: Path) -> None:
     with locked_shard_log(output_dir) as log_path:
         records = read_shard_log(log_path)
         if not any(record.get("shard") == path.name for record in records):
@@ -315,8 +349,8 @@ def log_shard_completed(output_dir: Path, source: Path, path: Path, positions: i
         write_shard_log(log_path, records)
 
 
-def output_shards_for(source: Path, input_jsonl: Path, output_dir: Path) -> list[tuple[int, Path]]:
-    name = "annotated_positions" if input_jsonl.is_file() else source.stem
+def output_shards_for(source: Path, output_dir: Path) -> list[tuple[int, Path]]:
+    name = source.stem
     pattern = re.compile(rf"^{re.escape(name)}-(\d+)\.jsonl(?:\.zst)?$")
     shards: list[tuple[int, Path]] = []
     for path in output_dir.glob(f"{name}-*.jsonl*"):
@@ -410,16 +444,15 @@ def compress_shard(path: Path) -> None:
 
 def prepare_output(
     source: Path,
-    input_jsonl: Path,
     output_dir: Path,
     *,
     resume: bool,
 ) -> tuple[set[str], int, int, Path]:
-    shards = output_shards_for(source, input_jsonl, output_dir)
+    shards = output_shards_for(source, output_dir)
     if not resume:
         for _, path in shards:
             path.unlink()
-        return set(), 0, 0, output_path_for(source, input_jsonl, output_dir, 0)
+        return set(), 0, 0, output_path_for(source, output_dir, 0)
 
     expected_plies = expected_plies_by_game(source)
     completed: set[str] = set()
@@ -437,15 +470,13 @@ def prepare_output(
         completed.update(recovered)
         return completed, index, positions, path
     next_index = shards[-1][0] + 1 if shards else 0
-    return completed, next_index, 0, output_path_for(source, input_jsonl, output_dir, next_index)
+    return completed, next_index, 0, output_path_for(source, output_dir, next_index)
 
 
 def annotate_source(
     source: Path,
-    input_jsonl: Path,
     output_dir: Path,
     *,
-    max_games: int | None,
     depth: int | None,
     movetime_ms: int | None,
     nodes: int | None,
@@ -454,16 +485,23 @@ def annotate_source(
     hash_mb: int | None,
     shard_size: int,
     resume: bool,
+    position_timeout_seconds: float = 5.0,
 ) -> Counter[str]:
     counts: Counter[str] = Counter()
     completed_games, shard_index, shard_positions, records_path = prepare_output(
         source,
-        input_jsonl,
         output_dir,
         resume=resume,
     )
-    if not records_path.exists() or not shard_has_started_log(output_dir, records_path):
-        log_shard_started(output_dir, source, records_path)
+    total_positions = sum(
+        int(record.get("positions", 0))
+        for record in read_shard_log(output_dir / SHARD_LOG_NAME)
+        if record.get("source") == str(source) and isinstance(record.get("positions"), int)
+    ) + shard_positions
+    print(
+        f"[start] source={source.name} resume_completed_games={len(completed_games)} shard_index={shard_index} shard_positions={shard_positions}",
+        flush=True,
+    )
     with PikafishAnnotator(
         find_pikafish(),
         depth=depth,
@@ -472,39 +510,50 @@ def annotate_source(
         threads=pikafish_threads,
         multipv=multipv,
         hash_mb=hash_mb,
+        position_timeout_seconds=position_timeout_seconds,
     ) as annotator:
+        annotate_position = annotator.annotate
+        dump_json = json.dumps
         games = iter(iter_unified_games(source))
-        output = records_path.open("a", encoding="utf-8")
-        while max_games is None or counts["processed_games"] < max_games:
+        output = None
+        source_game_index = 0
+        while True:
             try:
                 game = next(games)
             except StopIteration:
                 break
+            source_game_index += 1
             game_id = game.get("game_id")
             fen = game.get("fen")
             raw_moves = game.get("moves")
             if isinstance(game_id, str) and game_id in completed_games:
                 counts["skipped_games"] += 1
                 continue
-            counts["processed_games"] += 1
             if not isinstance(game_id, str) or not isinstance(fen, str) or not isinstance(raw_moves, list):
                 counts["invalid_games"] += 1
-                print("[error] invalid game record", flush=True)
+                print(
+                    f"[fail] source={source.name} game_index={source_game_index} reason=invalid-game-record processed={len(completed_games) + counts['invalid_games']} valid={len(completed_games)} invalid={counts['invalid_games']}",
+                    flush=True,
+                )
                 continue
             try:
                 moves = [iccs_to_indices(str(move)) for move in raw_moves]
                 position = encode_fen(fen)
+                game_split = split_for(game_id)
                 samples: list[dict[str, Any]] = []
                 for ply, (start, end) in enumerate(moves):
                     current_fen = position_to_fen(position)
-                    teacher = build_teacher(
-                        annotator.annotate(current_fen),
-                        requested_multipv=multipv,
-                    )
+                    try:
+                        teacher = build_teacher(
+                            annotate_position(current_fen),
+                            requested_multipv=multipv,
+                        )
+                    except (KeyError, TypeError, ValueError, IndexError, RuntimeError) as error:
+                        raise RuntimeError(f"ply={ply} {error}") from error
                     sample: dict[str, Any] = {
                         "schema_version": SCHEMA_VERSION,
                         "game_id": game_id,
-                        "split": split_for(game_id),
+                        "split": game_split,
                         "ply": ply,
                         "fen": current_fen,
                         "move": indices_to_iccs(start, end),
@@ -514,26 +563,70 @@ def annotate_source(
                     position = apply_move(position, start, end)
                 if not samples:
                     counts["invalid_games"] += 1
+                    print(
+                        f"[fail] source={source.name} game_index={source_game_index} reason=no-samples processed={len(completed_games) + counts['invalid_games']} valid={len(completed_games)} invalid={counts['invalid_games']}",
+                        flush=True,
+                    )
                     continue
                 if shard_positions >= shard_size:
-                    output.close()
+                    if output is not None:
+                        output.close()
+                    print(
+                        f"[shard] source={source.name} index={shard_index:03d} positions={shard_positions} action=compress",
+                        flush=True,
+                    )
                     log_shard_completed(output_dir, source, records_path, shard_positions)
                     compress_shard(records_path)
                     shard_index += 1
                     shard_positions = 0
-                    records_path = output_path_for(source, input_jsonl, output_dir, shard_index)
-                    log_shard_started(output_dir, source, records_path)
+                    records_path = output_path_for(source, output_dir, shard_index)
+                    ensure_shard_started(output_dir, source, records_path)
                     output = records_path.open("w", encoding="utf-8")
+                if output is None:
+                    ensure_shard_started(output_dir, source, records_path)
+                    output = records_path.open("a", encoding="utf-8")
                 for sample in samples:
-                    output.write(json.dumps(sample, ensure_ascii=False) + "\n")
+                    output.write(dump_json(sample, ensure_ascii=False) + "\n")
                 shard_positions += len(samples)
+                total_positions += len(samples)
                 counts["positions"] += len(samples)
                 counts["valid_games"] += 1
                 completed_games.add(game_id)
+                print(
+                    f"[ok] source={source.name} game_index={source_game_index} moves={len(samples)} processed={len(completed_games) + counts['invalid_games']} valid={len(completed_games)} invalid={counts['invalid_games']} shard_positions={shard_positions} total_positions={total_positions}",
+                    flush=True,
+                )
             except (KeyError, TypeError, ValueError, IndexError, RuntimeError) as error:
                 counts["invalid_games"] += 1
-                print(f"[error] source={source.name} game_id={game_id} error={error}", flush=True)
-        output.close()
+                print(
+                    f"[fail] source={source.name} game_index={source_game_index} reason={error} processed={len(completed_games) + counts['invalid_games']} valid={len(completed_games)} invalid={counts['invalid_games']}",
+                    flush=True,
+                )
+        if output is not None:
+            output.close()
+            if shard_positions > 0:
+                print(
+                    f"[shard] source={source.name} index={shard_index:03d} positions={shard_positions} action=compress-final",
+                    flush=True,
+                )
+                log_shard_completed(output_dir, source, records_path, shard_positions)
+                compress_shard(records_path)
+        elif shard_positions > 0 and records_path.exists():
+            # Resume may recover a non-empty raw shard and then skip all remaining games.
+            # In that case no new writes happen, but the recovered tail should still be finalized.
+            print(
+                f"[shard] source={source.name} index={shard_index:03d} positions={shard_positions} action=compress-recovered",
+                flush=True,
+            )
+            log_shard_completed(output_dir, source, records_path, shard_positions)
+            compress_shard(records_path)
+    counts["processed_games"] = len(completed_games) + counts["invalid_games"]
+    counts["valid_games"] = len(completed_games)
+    counts["total_positions"] = total_positions
+    print(
+        f"[done] source={source.name} processed={counts['processed_games']} valid={counts['valid_games']} invalid={counts['invalid_games']} skipped={counts['skipped_games']} shard_positions={shard_positions} total_positions={total_positions}",
+        flush=True,
+    )
     return counts
 
 
@@ -541,7 +634,6 @@ def annotate_games(
     input_jsonl: Path,
     output_dir: Path,
     *,
-    max_games: int | None,
     depth: int | None,
     movetime_ms: int | None,
     nodes: int | None,
@@ -551,16 +643,23 @@ def annotate_games(
     workers: int,
     shard_size: int,
     resume: bool,
+    position_timeout_seconds: float = 5.0,
 ) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     if not resume:
         (output_dir / SHARD_LOG_NAME).unlink(missing_ok=True)
-    sources = input_paths(input_jsonl)
+    sources = prioritize_sources_for_resume(
+        input_paths(input_jsonl),
+        output_dir,
+        resume=resume,
+    )
     worker_count = min(workers, len(sources))
+    print(
+        f"[plan] sources={len(sources)} workers={worker_count} resume={resume} input={input_jsonl}",
+        flush=True,
+    )
     common_args = {
-        "input_jsonl": input_jsonl,
         "output_dir": output_dir,
-        "max_games": max_games,
         "depth": depth,
         "movetime_ms": movetime_ms,
         "nodes": nodes,
@@ -569,11 +668,16 @@ def annotate_games(
         "hash_mb": hash_mb,
         "shard_size": shard_size,
         "resume": resume,
+        "position_timeout_seconds": position_timeout_seconds,
     }
     counts: Counter[str] = Counter()
 
     def report_done(source: Path, source_counts: Counter[str]) -> None:
         counts.update(source_counts)
+        print(
+            f"[worker-done] source={source.name} processed={source_counts['processed_games']} valid={source_counts['valid_games']} invalid={source_counts['invalid_games']} skipped={source_counts['skipped_games']} total_positions={source_counts['total_positions']}",
+            flush=True,
+        )
 
     if worker_count == 1:
         for source in sources:
@@ -583,6 +687,10 @@ def annotate_games(
             futures = {executor.submit(annotate_source, source, **common_args): source for source in sources}
             for future in concurrent.futures.as_completed(futures):
                 report_done(futures[future], future.result())
+    print(
+        f"[all-done] processed={counts['processed_games']} valid={counts['valid_games']} invalid={counts['invalid_games']} skipped={counts['skipped_games']} total_positions={counts['total_positions']}",
+        flush=True,
+    )
     return 0
 
 
@@ -590,10 +698,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Annotate human-game positions with Pikafish.")
     parser.add_argument("--input-jsonl", type=Path, required=True, help="normalized JSONL file or shard directory")
     parser.add_argument("--output-dir", type=Path, default=Path("data/processed/pikafish_annotations"))
-    parser.add_argument("--max-games", type=int)
     parser.add_argument("--workers", type=int, default=1, help="Pikafish worker processes for input shard directories")
     parser.add_argument("--shard-size", type=int, default=8192, help="Start a new output shard after a completed game reaches this position count")
     parser.add_argument("--resume", action="store_true", help="Continue from the latest output shard")
+    parser.add_argument(
+        "--position-timeout",
+        type=float,
+        default=5.0,
+        help="Maximum seconds to wait for one Pikafish position (default: 5)",
+    )
     parser.add_argument("--pikafish-threads", type=int, default=1)
     parser.add_argument("--hash-mb", type=int)
     parser.add_argument("--multipv", type=int, default=DEFAULT_MULTIPV)
@@ -605,7 +718,17 @@ def main() -> int:
 
     if not args.input_jsonl.is_file() and not args.input_jsonl.is_dir():
         parser.error(f"input not found: {args.input_jsonl}")
-    for name in ("max_games", "depth", "movetime_ms", "nodes", "pikafish_threads", "hash_mb", "multipv", "workers", "shard_size"):
+    for name in (
+        "depth",
+        "movetime_ms",
+        "nodes",
+        "pikafish_threads",
+        "hash_mb",
+        "multipv",
+        "workers",
+        "shard_size",
+        "position_timeout",
+    ):
         value = getattr(args, name)
         if value is not None and value < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive")
@@ -614,7 +737,6 @@ def main() -> int:
     return annotate_games(
         args.input_jsonl,
         args.output_dir,
-        max_games=args.max_games,
         depth=args.depth,
         movetime_ms=args.movetime_ms,
         nodes=args.nodes,
@@ -624,6 +746,7 @@ def main() -> int:
         workers=args.workers,
         shard_size=args.shard_size,
         resume=args.resume,
+        position_timeout_seconds=args.position_timeout,
     )
 
 
