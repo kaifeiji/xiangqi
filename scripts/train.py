@@ -22,29 +22,22 @@ from backend.inference import complete_move_topk
 @dataclass(frozen=True)
 class ShardPaths:
     positions: Path
-    start_indices: Path | None = None
-    end_indices: Path | None = None
+    start_indices: Path
+    end_indices: Path
     values: Path | None = None
-
-    @property
-    def is_memory_mappable(self) -> bool:
-        return self.start_indices is not None and self.end_indices is not None
-
 
 def find_shards(data_dir: Path, split: str) -> list[ShardPaths]:
     position_paths = sorted(data_dir.glob(f"{split}-*-positions.npy"))
-    if position_paths:
-        shards = []
-        for positions in position_paths:
-            prefix = positions.name.removesuffix("-positions.npy")
-            starts = positions.with_name(f"{prefix}-start_indices.npy")
-            ends = positions.with_name(f"{prefix}-end_indices.npy")
-            if not starts.exists() or not ends.exists():
-                raise FileNotFoundError(f"missing label arrays for {positions}")
-            values = positions.with_name(f"{prefix}-values.npy")
-            shards.append(ShardPaths(positions, starts, ends, values if values.exists() else None))
-        return shards
-    return [ShardPaths(path) for path in sorted(data_dir.glob(f"{split}-*.npz"))]
+    shards = []
+    for positions in position_paths:
+        prefix = positions.name.removesuffix("-positions.npy")
+        starts = positions.with_name(f"{prefix}-start_indices.npy")
+        ends = positions.with_name(f"{prefix}-end_indices.npy")
+        if not starts.exists() or not ends.exists():
+            raise FileNotFoundError(f"missing label arrays for {positions}")
+        values = positions.with_name(f"{prefix}-values.npy")
+        shards.append(ShardPaths(positions, starts, ends, values if values.exists() else None))
+    return shards
 
 
 class ShardDataset(IterableDataset):
@@ -60,19 +53,14 @@ class ShardDataset(IterableDataset):
         self.sizes: list[int] = []
         self.training = False
         for shard in shards:
-            if shard.is_memory_mappable:
-                assert shard.start_indices is not None
-                size = len(np.load(shard.positions, mmap_mode="r"))
-                if len(np.load(shard.start_indices, mmap_mode="r")) != size:
-                    raise ValueError(f"label length does not match positions in {shard.positions}")
-                if self.value_head:
-                    if shard.values is None:
-                        raise FileNotFoundError(f"value labels required for {shard.positions}")
-                    if len(np.load(shard.values, mmap_mode="r")) != size:
-                        raise ValueError(f"value label length does not match positions in {shard.positions}")
-            else:
-                with np.load(shard.positions) as data:
-                    size = len(data["positions"])
+            size = len(np.load(shard.positions, mmap_mode="r"))
+            if len(np.load(shard.start_indices, mmap_mode="r")) != size:
+                raise ValueError(f"label length does not match positions in {shard.positions}")
+            if self.value_head:
+                if shard.values is None:
+                    raise FileNotFoundError(f"value labels required for {shard.positions}")
+                if len(np.load(shard.values, mmap_mode="r")) != size:
+                    raise ValueError(f"value label length does not match positions in {shard.positions}")
             self.sizes.append(size)
 
     def __len__(self) -> int:
@@ -90,25 +78,15 @@ class ShardDataset(IterableDataset):
         return sum(self.sizes)
 
     def _load_shard(self, shard: ShardPaths) -> tuple[np.ndarray, ...]:
-        if shard.is_memory_mappable:
-            assert shard.start_indices is not None
-            assert shard.end_indices is not None
-            arrays: tuple[np.ndarray, ...] = (
-                np.load(shard.positions, mmap_mode="r"),
-                np.load(shard.start_indices, mmap_mode="r"),
-                np.load(shard.end_indices, mmap_mode="r"),
-            )
-            if self.value_head:
-                assert shard.values is not None
-                arrays += (np.load(shard.values, mmap_mode="r"),)
-            return arrays
-        with np.load(shard.positions) as data:
-            arrays = (
-                data["positions"].copy(),
-                data["start_indices"].copy(),
-                data["end_indices"].copy(),
-            )
-            return arrays
+        arrays: tuple[np.ndarray, ...] = (
+            np.load(shard.positions, mmap_mode="r"),
+            np.load(shard.start_indices, mmap_mode="r"),
+            np.load(shard.end_indices, mmap_mode="r"),
+        )
+        if self.value_head:
+            assert shard.values is not None
+            arrays += (np.load(shard.values, mmap_mode="r"),)
+        return arrays
 
     def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         worker = get_worker_info()
@@ -196,6 +174,7 @@ def evaluate(
     device: torch.device,
     limit: int | None,
     value_head: bool = False,
+    value_weight: float = 0.5,
     amp_enabled: bool = False,
 ) -> dict[str, float]:
     model.eval()
@@ -224,7 +203,7 @@ def evaluate(
                 predictions = outputs[2].reshape(-1)
                 values = values.reshape(-1)
                 value_loss = nn.functional.mse_loss(predictions, values)
-                loss = loss + 0.5 * value_loss
+                loss = loss + value_weight * value_loss
                 total_value_loss += value_loss.item() * len(positions)
                 total_value_absolute_error += torch.abs(predictions - values).sum().item()
                 value_sum += values.sum().item()
@@ -292,6 +271,7 @@ def main() -> int:
     parser.add_argument("--mirror", action="store_true")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True, help="use CUDA mixed precision")
     parser.add_argument("--value-head", action="store_true", help="train a new model with a supervised value head")
+    parser.add_argument("--value-weight", type=float, default=0.5, help="weight of value loss when using --value-head")
     parser.add_argument(
         "--resume",
         nargs="?",
@@ -303,11 +283,16 @@ def main() -> int:
     args = parser.parse_args()
     if args.prefetch_factor < 1:
         parser.error("--prefetch-factor must be positive")
+    if args.value_weight < 0:
+        parser.error("--value-weight must be non-negative")
 
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp_enabled = bool(args.amp and device.type == "cuda")
+    torch.set_float32_matmul_precision("high")
     if device.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
         torch.backends.cudnn.benchmark = True
     train_shards = find_shards(args.data_dir, "train")
     validation_shards = find_shards(args.data_dir, "validation")
@@ -342,7 +327,11 @@ def main() -> int:
         blocks=args.blocks,
         value_head=args.value_head,
     ).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.learning_rate,
+        fused=device.type == "cuda",
+    )
     updates_per_epoch = max(1, (len(train_loader) + args.accumulation_steps - 1) // args.accumulation_steps)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs * updates_per_epoch
@@ -399,9 +388,13 @@ def main() -> int:
             starts = starts.to(device, non_blocking=True)
             ends = ends.to(device, non_blocking=True)
             if args.mirror:
-                positions = torch.flip(positions, dims=[3])
-                starts = (starts // positions.shape[3]) * positions.shape[3] + (positions.shape[3] - 1 - starts % positions.shape[3])
-                ends = (ends // positions.shape[3]) * positions.shape[3] + (positions.shape[3] - 1 - ends % positions.shape[3])
+                mirrored_positions = torch.flip(positions, dims=[3])
+                width = positions.shape[3]
+                mirrored_starts = (starts // width) * width + (width - 1 - starts % width)
+                mirrored_ends = (ends // width) * width + (width - 1 - ends % width)
+                positions = torch.cat((positions, mirrored_positions), dim=0)
+                starts = torch.cat((starts, mirrored_starts), dim=0)
+                ends = torch.cat((ends, mirrored_ends), dim=0)
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
                 outputs = model(positions)
                 start_logits, end_logits = outputs[:2]
@@ -410,8 +403,10 @@ def main() -> int:
                 value_loss = None
                 if args.value_head:
                     values = batch[3].to(device, non_blocking=True)
+                    if args.mirror:
+                        values = torch.cat((values, values), dim=0)
                     value_loss = nn.functional.mse_loss(outputs[2].reshape(-1), values.reshape(-1))
-                    batch_loss = batch_loss + 0.5 * value_loss
+                    batch_loss = batch_loss + args.value_weight * value_loss
             training_loss_total += batch_loss.item() * len(positions)
             training_policy_loss_total += policy_loss.item() * len(positions)
             if value_loss is not None:
@@ -462,6 +457,7 @@ def main() -> int:
             device,
             limit=50 if args.max_steps else None,
             value_head=args.value_head,
+            value_weight=args.value_weight,
             amp_enabled=amp_enabled,
         )
         validation_loss = validation_metrics["loss"]
@@ -482,12 +478,10 @@ def main() -> int:
             "validation_metrics": validation_metrics,
             "best_validation_loss": best_validation_loss,
             "epochs_without_improvement": epochs_without_improvement,
-            "config": {
-                **vars(args),
-                "current_view": args.current_view,
-            },
+            "config": vars(args),
         }
         torch.save(checkpoint, args.checkpoint_dir / "last.pt")
+        torch.save(checkpoint, args.checkpoint_dir / f"epoch-{epoch + 1:04d}.pt")
         if improved:
             torch.save(checkpoint, args.checkpoint_dir / "best.pt")
         append_metrics(
@@ -520,6 +514,8 @@ def main() -> int:
         device,
         limit=50 if args.max_steps else None,
         value_head=args.value_head,
+        value_weight=args.value_weight,
+        amp_enabled=amp_enabled,
     )
     print(json.dumps({"test": test_metrics}, ensure_ascii=False), flush=True)
     return 0
