@@ -117,6 +117,30 @@ uv run python scripts\train.py `
 
 训练输出目录通常包含 `last.pt`、`best.pt` 和 `metrics.jsonl`。前两者分别表示最近一次保存和 validation 指标最佳的 checkpoint，指标文件用于记录训练/验证过程。
 
+### 模型对弈 Benchmark
+
+`benchmark_models.py` 让两个模型直接进行多盘中国象棋对弈，不依赖前端。默认对弈 100 盘，并交替双方红黑方；结果以 JSON 写入 `benchmark/model_benchmark.json`。生成的 JSON 文件不会提交到 Git。
+
+从仓库根目录运行：
+
+```powershell
+uv run python scripts\benchmark_models.py `
+  --model-a models\model-a.pt `
+  --model-b models\model-b.pt
+```
+
+可用 `--games N` 修改盘数，使用 `--output PATH` 指定 JSON 输出路径；带 value head 的模型可通过 `--mcts-time SECONDS` 启用 MCTS。
+
+Smoke 示例：
+
+```powershell
+uv run python scripts\benchmark_models.py `
+  --model-a models\resnet-c64-b4.pt `
+  --model-b models\resnet-c64-b4-value.pt `
+  --games 10 `
+  --output benchmark\resnet-c64-b4-vs-value.json
+```
+
 ### Current-side-view 数据
 
 如果希望让模型始终从当前行棋方视角读取棋盘，可使用：
