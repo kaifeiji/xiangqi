@@ -2,25 +2,40 @@
 
 本项目面向消费级显卡训练中国象棋模型，使用人类棋局数据进行训练。
 
-项目包含数据准备、ResNet 模型训练、Pikafish 蒸馏标签生成、模型评估和棋规引擎。数据准备阶段将不同来源的人类棋局统一转换为局面、走法标签和可选的终局价值标签；训练阶段使用统一的棋盘张量训练策略模型，也可以训练 value head。Web 服务支持普通模型推理、current-side-view、MCTS 和 Pikafish 对手。
+项目包含数据准备、ResNet 模型训练、Pikafish 蒸馏标签生成、模型评估和棋规引擎。数据准备阶段将不同来源的人类棋局统一转换为局面、走法标签和可选的终局价值标签；训练阶段使用统一的棋盘张量训练策略模型，也可以训练 value head。Web 服务支持模型推理、MCTS 和 Pikafish 对手。
 
 - Python 3.11/3.12
+- Node.js/npm（Web 前端开发和启动所需）
 - PyTorch 2.x
 - 输入张量：`(15, 10, 9)`
 - ResNet 模型：起点/终点策略 logits，可选 value head
 
-## 环境准备
+## 环境与依赖
 
 ```powershell
 python -m pip install uv
 python -m uv sync
 ```
 
-本地 Pikafish 路径模板见 [`.env.example`](.env.example)。复制为 `.env.local` 后，将其中路径变量加载到当前 shell；脚本会自动读取仓库根目录的 `.env.local`。
+前端使用 Node.js/npm，开发模式启动前需要先安装依赖：
 
-## 启动
+```powershell
+npm ci
+```
 
-项目提供 Web 对弈服务，生产模式和开发模式使用同一个入口。
+训练或本地推理使用 CUDA 时，需要兼容的 NVIDIA 驱动和 PyTorch CUDA 环境；CPU 模式不需要 CUDA。Pikafish 仅在引擎对手或标注流程中需要，不是 PyTorch 依赖。
+
+本地 Pikafish 路径模板见 [`.env.example`](.env.example)。标注脚本读取 `.env.local`；Web 服务不读取该文件，启动引擎对手时需显式设置进程环境变量：
+
+```powershell
+$env:PIKAFISH_PATH = "C:\path\to\pikafish.exe"
+$env:PIKAFISH_NNUE_PATH = "C:\path\to\pikafish.nnue"
+uv run xiangqi-play --host 127.0.0.1 --port 8000
+```
+
+## Web 服务
+
+项目提供 Web 对弈服务，生产模式和开发模式使用同一个 Python 入口。
 
 生产模式：
 
@@ -34,7 +49,7 @@ uv run xiangqi-play --host 127.0.0.1 --port 8000
 uv run xiangqi-play --dev
 ```
 
-开发模式访问 `http://127.0.0.1:5173`，后端 API 地址为 `http://127.0.0.1:8000`。
+生产模式会安装并构建前端后由 Flask 提供静态文件；开发模式启动 Vite，并将 API 代理到 `http://127.0.0.1:8000`。开发模式访问 `http://127.0.0.1:5173`。
 
 Web 界面提供人机对弈、模型对弈和 JSON 存档回放。模型对弈支持自动/单步推进、模型选择和可选的 MCTS 时间预算；落子默认使用确定性策略（不启用温度采样）；人机模式支持悔棋和局面导航。
 
@@ -42,11 +57,14 @@ Web 界面提供人机对弈、模型对弈和 JSON 存档回放。模型对弈�
 
 - 当 `POST /api/games` 请求未提供 `fen` 时，服务会从内置主流开局首着池随机选择一个开局局面作为起点。
 - 当请求提供 `fen` 时，始终以该 `fen` 为准。
-- benchmark 脚本 `scripts/benchmark_models.py` 在未提供 `--fen` 时同样默认使用这套内置主流开局随机起局；提供 `--fen` 时则固定使用指定局面。
 
-## 前端开发
+## 数据与训练
 
-前端源码位于 `src/frontend/`，使用 React、TypeScript 和 Vite。开发模式启动后，修改 React、TypeScript 或 CSS 文件会自动热更新。
+数据处理和训练流程为：`data/raw/` -> 统一 JSONL -> NPY 数据集 -> `checkpoints/`。支持 PGN、XQF 等输入格式；脚本参数、数据格式和训练配置统一见 [scripts/README.md](scripts/README.md)，目录约定见 [data/README.md](data/README.md)。
+
+## 开发入口
+
+前端源码位于 `src/frontend/`，使用 React、TypeScript 和 Vite；后端源码位于 `src/backend/`，包含 Flask API、棋规引擎、模型推理和 player 实现。
 
 单独检查前端构建：
 
@@ -55,9 +73,7 @@ npm ci
 npm run build
 ```
 
-## 后端开发
-
-后端源码位于 `src/backend/`，包含 Flask API、棋规引擎、模型推理和 player 实现。也可以直接运行 Flask 入口：
+也可以绕过 Web 构建直接运行 Flask 入口：
 
 ```powershell
 uv run python -m backend.app --host 127.0.0.1 --port 8000
@@ -65,17 +81,9 @@ uv run python -m backend.app --host 127.0.0.1 --port 8000
 
 ## 模型加载
 
-训练完成后，将模型 checkpoint 放入 `models/` 目录或其子目录。服务会递归发现 `.pt`、`.pth` 和 `.ckpt` 文件，并在 Web 界面中使用相对路径作为模型 ID。训练脚本保存的 checkpoint 包含模型结构配置时，服务可以据此重建模型；不同的 value head 或 current-view 模型应在文件名或目录名中明确区分。
+训练完成后，将模型 checkpoint 放入 `models/` 目录或其子目录。服务会递归发现 `.pt`、`.pth` 和 `.ckpt` 文件，并在 Web 界面中使用相对路径作为模型 ID。训练脚本保存的 checkpoint 包含模型结构配置时，服务可以据此重建模型；不同的模型架构或 value head 应在文件名或目录名中明确区分。
 
 Pikafish 不作为 PyTorch checkpoint 放入 `models/`，而是通过 `.env.local` 中的 `PIKAFISH_PATH` 和可选的 `PIKAFISH_NNUE_PATH` 配置。
-
-内置引擎基准（不依赖棋局数据）可直接运行：
-
-```powershell
-uv run python scripts\benchmark_pikafish.py
-```
-
-该脚本会比较同目录 `pikafish-*.exe` 的 `bench` 结果，并输出按 `nps` 排序的推荐 CPU 版本。
 
 ## 棋规与终局限制
 
@@ -93,6 +101,8 @@ uv run pytest -q
 
 数据准备、训练、评估和测试命令见 [scripts/README.md](scripts/README.md)。
 
+其他目录说明：[`models/README.md`](models/README.md)、[`checkpoints/README.md`](checkpoints/README.md)。
+
 ## 文献参考
 
 - [A general reinforcement learning algorithm that masters chess, shogi, and Go through self-play](https://doi.org/10.1126/science.aar6404)（Silver et al., Science, 2018）：介绍基于神经网络策略/价值双头与蒙特卡洛树搜索的自博弈系统。
@@ -105,3 +115,11 @@ uv run pytest -q
 - [Squeeze-and-Excitation Networks](https://arxiv.org/abs/1709.01507)（Hu, Shen, Sun, CVPR, 2018）：提出 Squeeze-and-Excitation 模块，通过通道间信息建模和通道重标定增强卷积网络表示能力。
 - [Bandit Based Monte-Carlo Planning](https://link.springer.com/chapter/10.1007/11871842_29)（Kocsis, Szepesvári, ECML, 2006）：提出 UCT，将置信上界策略用于蒙特卡洛树搜索中的节点选择。
 - [Efficient Selectivity and Backup Operators in Monte-Carlo Tree Search](https://www.cs.utexas.edu/~pstone/Papers/bib2html-links/Coulom-2006.pdf)（Coulom, 2006）：研究蒙特卡洛树搜索中的选择、模拟和回传机制。
+- [Policy Distillation](https://arxiv.org/abs/1511.06295)（Rusu et al., 2015）：说明以软化动作目标蒸馏策略。
+- [Pikafish types.h](https://github.com/official-pikafish/Pikafish/blob/master/src/types.h)：mate 与普通搜索值的内部编码。
+- [Pikafish score.cpp](https://github.com/official-pikafish/Pikafish/blob/master/src/score.cpp)：普通值和 mate 在 UCI 输出边界的类型转换。
+- [Pikafish uci.cpp](https://github.com/official-pikafish/Pikafish/blob/master/src/uci.cpp)：`score cp`、`score mate` 和 WDL 的格式化逻辑。
+- [Pikafish engine.cpp](https://github.com/official-pikafish/Pikafish/blob/master/src/engine.cpp)：引擎选项，包括 `UCI_ShowWDL`。
+- [Stockfish types.h](https://github.com/official-stockfish/Stockfish/blob/master/src/types.h)、[score.cpp](https://github.com/official-stockfish/Stockfish/blob/master/src/score.cpp) 与 [uci.cpp](https://github.com/official-stockfish/Stockfish/blob/master/src/uci.cpp)：国际象棋引擎的对应实现；其 tablebase 特殊编码不可直接迁用到象棋训练标签。
+- [PyTorch Data Loading](https://docs.pytorch.org/docs/stable/data.html) 与 [DataLoader source](https://github.com/pytorch/pytorch/blob/main/torch/utils/data/dataloader.py)：map-style dataset、worker 与采样器行为。
+- [UCI Protocol](https://www.shredderchess.com/chess-features/uci-universal-chess-interface.html)：UCI 协议说明与规范下载页。

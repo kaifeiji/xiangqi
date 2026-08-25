@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from backend.game.players import ModelPlayer
-from backend.models import ResNet
+from backend.models import PikafishResNet, ResNet
 
 
 def test_web_lists_models_from_models_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -76,6 +76,22 @@ def test_model_player_loads_training_checkpoint_with_windows_path_metadata(tmp_p
     player = ModelPlayer.from_checkpoint(name="Model", checkpoint=checkpoint_path)
 
     assert isinstance(player.model, ResNet)
+
+
+def test_model_player_loads_pikafish_checkpoint(tmp_path: Path) -> None:
+    checkpoint_path = tmp_path / "pikafish-model.pt"
+    torch.save(
+        {
+            "model": PikafishResNet(channels=32, blocks=2).state_dict(),
+            "config": {"checkpoint_dir": WindowsPath("checkpoints/pikafish-run")},
+        },
+        checkpoint_path,
+    )
+
+    player = ModelPlayer.from_checkpoint(name="PikafishModel", checkpoint=checkpoint_path)
+
+    assert isinstance(player.model, PikafishResNet)
+    assert player.current_view is True
 
 
 def test_select_initial_fen_uses_opening_pool_by_default() -> None:

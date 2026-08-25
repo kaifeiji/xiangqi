@@ -14,7 +14,7 @@ import torch
 from torch import nn
 
 from backend.inference.move_scoring import apply_legal_move_mask, joint_move_logits, legal_move_mask
-from backend.models import ResNet
+from backend.models import PikafishResNet, ResNet
 
 from .engine import (
     BOARD_COLS,
@@ -145,15 +145,36 @@ class ModelPlayer:
             with torch.serialization.safe_globals([WindowsPath]):
                 state = torch.load(checkpoint, map_location=resolved_device, weights_only=True)
             config = state.get("config", {}) if isinstance(state, dict) else {}
+            if isinstance(state, dict) and "model_state_dict" in state:
+                state = state["model_state_dict"]
+            if isinstance(state, dict) and "model" in state:
+                state = state["model"]
+            if isinstance(state, dict) and "policy_head.weight" in state:
+                channels = int(state["policy_head.weight"].shape[1])
+                residual_indices = {
+                    int(key.split(".")[1])
+                    for key in state
+                    if key.startswith("residual_blocks.")
+                }
+                blocks = max(residual_indices) + 1 if residual_indices else 12
+                if current_view is None:
+                    current_view = bool(config.get("current_view", True))
+                model = PikafishResNet(channels=channels, blocks=blocks)
+                model.load_state_dict(state)
+                model.to(resolved_device)
+                model.eval()
+                return PikafishModelPlayer(
+                    name=name,
+                    model=model,
+                    device=resolved_device,
+                    current_view=current_view,
+                    mcts_time_seconds=mcts_time_seconds,
+                )
             channels = int(config.get("channels", 64))
             blocks = int(config.get("blocks", 4))
             value_head = bool(config.get("value_head", False))
             if current_view is None:
                 current_view = bool(config.get("current_view", False))
-            if isinstance(state, dict) and "model_state_dict" in state:
-                state = state["model_state_dict"]
-            if isinstance(state, dict) and "model" in state:
-                state = state["model"]
             model = ResNet(
                 channels=channels,
                 blocks=blocks,
@@ -260,6 +281,121 @@ class ModelPlayer:
                 [model_legal],
                 device=move_logits.device,
             )
+            masked = apply_legal_move_mask(move_logits, move_mask)
+            if position_counts:
+                fresh_mask = move_mask.clone()
+                for model_start, model_end in model_legal:
+                    original_move = Move(
+                        current_view_index(model_start) if self.current_view and position.side_to_move == "b" else model_start,
+                        current_view_index(model_end) if self.current_view and position.side_to_move == "b" else model_end,
+                    )
+                    next_position = apply_move(position, original_move)
+                    if position_counts.get(next_position, 0) > 0:
+                        fresh_mask[0, model_start * 90 + model_end] = False
+                if fresh_mask.any():
+                    masked = masked.masked_fill(~fresh_mask, torch.finfo(masked.dtype).min)
+            selected = int(masked.argmax(dim=1).item())
+        model_move = Move(selected // 90, selected % 90)
+        move = (
+            Move(current_view_index(model_move.start), current_view_index(model_move.end))
+            if self.current_view and position.side_to_move == "b"
+            else model_move
+        )
+        if (move.start, move.end) not in {(m.start, m.end) for m in legal}:
+            raise RuntimeError(f"model selected illegal move: {move_to_iccs(move)}")
+        return move
+
+
+@dataclass
+class PikafishModelPlayer:
+    name: str
+    model: nn.Module
+    device: torch.device
+    current_view: bool = True
+    mcts_time_seconds: float = 0.0
+
+    def choose_move(self, position: Position, position_counts: dict[Position, int] | None = None) -> Move:
+        if self.mcts_time_seconds > 0:
+            return self._choose_mcts(position, position_counts)
+        return self._choose_policy_move(position, position_counts)
+
+    def _model_outputs(self, position: Position) -> tuple[torch.Tensor, float]:
+        board = position_to_tensor(position)
+        if self.current_view:
+            board = current_view_tensor(position, board)
+        with torch.no_grad():
+            move_logits, value = self.model(board.unsqueeze(0).to(self.device))
+        bounded_value = float(value.reshape(-1)[0].item())
+        return move_logits[0], max(-1.0, min(1.0, bounded_value))
+
+    def _policy_priors(self, position: Position, legal: list[Move]) -> tuple[dict[Move, float], float]:
+        move_logits, value = self._model_outputs(position)
+        scores = []
+        model_legal: list[tuple[int, int]] = []
+        for move in legal:
+            model_start = current_view_index(move.start) if self.current_view and position.side_to_move == "b" else move.start
+            model_end = current_view_index(move.end) if self.current_view and position.side_to_move == "b" else move.end
+            model_legal.append((model_start, model_end))
+            scores.append(move_logits[model_start * 90 + model_end])
+        probabilities = torch.softmax(torch.stack(scores), dim=0).cpu().tolist()
+        priors: dict[Move, float] = {}
+        for move, probability in zip(legal, probabilities):
+            priors[move] = float(probability)
+        return priors, value
+
+    def _choose_mcts(self, position: Position, position_counts: dict[Position, int] | None) -> Move:
+        root_position = position
+
+        def search_legal(node_position: Position) -> list[Move]:
+            moves = legal_moves(node_position)
+            if node_position != root_position or not position_counts:
+                return moves
+            fresh_moves = [
+                move
+                for move in moves
+                if position_counts.get(apply_move(node_position, move), 0) == 0
+            ]
+            return fresh_moves or moves
+
+        def terminal_value(node_position: Position) -> float | None:
+            if not king_exists(node_position, "w"):
+                return 1.0 if node_position.side_to_move == "b" else -1.0
+            if not king_exists(node_position, "b"):
+                return 1.0 if node_position.side_to_move == "w" else -1.0
+            if not legal_moves(node_position):
+                return -1.0
+            return None
+
+        def policy_value(node_position: Position, node_legal: list[Move]) -> tuple[dict[Move, float], float]:
+            return self._policy_priors(node_position, node_legal)
+
+        search = MCTS(
+            legal_moves=search_legal,
+            apply_move=apply_move,
+            policy_value=policy_value,
+            terminal_value=terminal_value,
+        )
+        return search.search(position, self.mcts_time_seconds, root_temperature=0.0)
+
+    def _choose_policy_move(self, position: Position, position_counts: dict[Position, int] | None = None) -> Move:
+        legal = legal_moves(position)
+        if not legal:
+            raise ValueError("no legal moves available")
+
+        board = position_to_tensor(position)
+        model_legal = [(move.start, move.end) for move in legal]
+        if self.current_view:
+            board = current_view_tensor(position, board)
+            if position.side_to_move == "b":
+                model_legal = [
+                    (current_view_index(move.start), current_view_index(move.end))
+                    for move in legal
+                ]
+
+        board = board.unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            move_logits, _ = self.model(board)
+            move_mask = legal_move_mask([model_legal], device=move_logits.device)
             masked = apply_legal_move_mask(move_logits, move_mask)
             if position_counts:
                 fresh_mask = move_mask.clone()

@@ -222,7 +222,7 @@ def iter_book_records(
                 for index, game in enumerate(games):
                     stats["book_games_seen"] += 1
                     yield normalize_record(
-                        source_type="chess_book",
+                        source_type="xqp",
                         source_file=game.source,
                         fen=game.fen,
                         moves=game.moves,
@@ -281,7 +281,7 @@ def remove_stale_temporary_files(output: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Normalize PGN and chess-book games into one per-game JSONL format."
+        description="Normalize PGN and xqp games into one per-game JSONL format."
     )
     parser.add_argument("--pgn", nargs="*", type=Path, default=[])
     parser.add_argument("--book-input-dir", type=Path)

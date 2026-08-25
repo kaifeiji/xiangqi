@@ -6,7 +6,7 @@
 
 ```text
 data/raw/
-	PGN/XQF 棋谱和 chess_book 数据
+	PGN/XQF 棋谱和 xqp 数据
 
 data/processed/human_games/
 	train-*.jsonl
