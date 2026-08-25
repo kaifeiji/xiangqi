@@ -210,6 +210,8 @@ $$
 
 MultiPV 分差可作为裁剪后的 policy 难度权重。PV2/PV3 不混入 PV1 value target；未进入 Top-N 的合法走法不应直接当作非法动作。cp/mate 到 value、mate 的 pseudo-cp 映射、softmax 温度与人类/teacher policy 混合权重均在训练准备或训练阶段配置。
 
+### Pikafish 标注输出
+
 目录中会写入 `annotation_config.json`、`dataset_summary.json`、按输入 shard 命名的 JSONL 和对应的失败事件流。每个 shard 先写入 `.partial.jsonl`，完成后原子改名；每局写入后 fsync。`--resume` 会扫描 JSONL，只接受 ply 从 0 连续且数量与源棋局一致的完整游戏，并移除 partial 中断尾。普通续跑跳过已失败游戏；使用 `--retry-failed` 才会重试尚未成功的失败游戏。
 
 输出目录绑定 schema、输入 shard 的 SHA-256、depth/时间预算、MultiPV 和 PikaFish 线程数。配置不匹配时会拒绝运行，需使用新的 `--output-dir`。
@@ -223,3 +225,58 @@ uv run python scripts\annotate_pikafish.py --input-jsonl data\processed\human_ga
 ```
 
 确认三次运行零失败、PV 回放和恢复语义正确后，再为每个命令添加 `--resume`。
+
+### Pikafish 蒸馏数据准备
+
+`prepare_pikafish.py` 将**已完成**的 canonical 标注 JSONL 导出为 current-view 蒸馏 NPY。目录输入优先读取完成的 `.jsonl.zst` shard，并跳过 partial 文件：
+
+```powershell
+uv run python scripts\prepare_pikafish.py `
+  --input-jsonl data\processed\pikafish-d10-m5 `
+  --output-dir data\processed\pikafish-distillation `
+  --max-candidates 5
+```
+
+每个已完成的标注 `jsonl.zst` 独立生成一个同名前缀的 dataset shard，例如 `test-000-000.jsonl.zst` 生成 `dataset/test-000-000-*.npy`。shard 写入 `(15, 10, 9)` 的 `positions`、teacher 分数类型和数值，以及排序去重后的 `candidate_action_ids`/`candidate_scores`。动作 ID 为 `90 * from + to`，黑方局面先转换到 current-view。合法着以紧凑的 `legal_action_ids` 与 `legal_action_offsets` 保存；游戏信息保存在每局一行的 `games.jsonl` 中，每行包含 `game_id`、`sample_start` 和 `sample_end`，不再写逐样本 `metadata`、`game_indices` 或 `plys`。同一局的样本必须在 shard 内连续写入。候选槽位是否有效由 `candidate_action_ids >= 0` 推导，不额外保存 mask。prepare 不判断样本是否用于某个 head，现有 `train.py` 暂不消费这些蒸馏字段。
+
+prepare 按输入标注 shard 恢复：输出前会检查同名前缀的全部文件，完整 shard 直接跳过，未完成或缺失文件则重新生成。进度以 `shards=已完成/总数` 报告；单个标注 shard 内的记录仍会每 5 秒报告一次。
+
+### 蒸馏 NPY 的形状
+
+把一个 shard 想成 `N` 张局面卡片叠在一起。除合法着外，所有数组的第 `i` 项都描述同一张卡片：
+
+```text
+第 i 个局面
+  positions[i]              (15, 10, 9)  15 个棋子/行棋方通道的 10 x 9 棋盘
+  teacher_cp[i]             ()           Pikafish 原始 cp；无效 value 为 NaN
+  teacher_score_kinds[i]    ()           0=cp，1=mate
+  teacher_scores[i]         ()           teacher 原始分数
+  candidate_action_ids[i]   (5,)         Top-5 候选动作，不足 5 个用 -1 补齐
+  candidate_score_kinds[i]  (5,)         0=cp，1=mate
+  candidate_scores[i]       (5,)         与候选动作一一对应的原始 cp
+```
+
+因此常规固定形状字段为：
+
+```text
+positions               (N, 15, 10, 9)
+teacher_cp              (N,)
+teacher_score_kinds     (N,)
+teacher_scores          (N,)
+candidate_action_ids    (N, 5)
+candidate_score_kinds   (N, 5)
+candidate_scores        (N, 5)
+```
+
+一个联合动作 ID 可拆回棋盘坐标：`from = action_id // 90`、`to = action_id % 90`。例如 `C3-C4` 的两个格点索引为 `29` 和 `38`，其 ID 是 `90 * 29 + 38 = 2648`。candidate 的有效 ID 必须同时出现在同一局面的合法着集合中。
+
+每局合法着数量不同，不能写成低效的 `(N, 8100)` mask。因此所有合法 action ID 拼成一条长数组，再用 offsets 切回各局面：
+
+```text
+legal_action_ids      (L,)       [局面 0 的全部合法着 | 局面 1 的全部合法着 | ...]
+legal_action_offsets  (N + 1,)   [0, L_0, L_0 + L_1, ..., L]
+
+局面 i 的合法着 = legal_action_ids[offsets[i] : offsets[i + 1]]
+```
+
+这里 $L = \sum_i L_i$，$L_i$ 是第 `i` 个局面的合法着数量。这样训练期可只对该切片的 logits 做 softmax，不会为 `8100` 个动作逐局存储布尔掩码。每个 shard 另有 `games.jsonl`：每行保存一局的 `game_id` 及其样本半开区间 `[sample_start, sample_end)`，供审计和 game-level sampling；不再生成逐样本的 `game_indices.npy` 或 `plys.npy`。

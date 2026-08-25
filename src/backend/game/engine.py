@@ -295,19 +295,95 @@ def resets_natural_limit(position: Position, move: Move) -> bool:
     return False
 
 
+def _ray_attacker(
+    position: Position,
+    target_row: int,
+    target_col: int,
+    row_step: int,
+    col_step: int,
+    attacker_side: str,
+    kinds: set[str],
+) -> bool:
+    row, col = target_row + row_step, target_col + col_step
+    while _inside(row, col):
+        piece = _piece_at(position, row, col)
+        if piece is not None:
+            return _own_piece(piece, attacker_side) and piece.upper() in kinds
+        row += row_step
+        col += col_step
+    return False
+
+
+def _cannon_attacker(
+    position: Position,
+    target_row: int,
+    target_col: int,
+    row_step: int,
+    col_step: int,
+    attacker_side: str,
+) -> bool:
+    row, col = target_row + row_step, target_col + col_step
+    while _inside(row, col) and _piece_at(position, row, col) is None:
+        row += row_step
+        col += col_step
+    if not _inside(row, col):
+        return False
+    row += row_step
+    col += col_step
+    while _inside(row, col):
+        piece = _piece_at(position, row, col)
+        if piece is not None:
+            return _own_piece(piece, attacker_side) and piece.upper() == "C"
+        row += row_step
+        col += col_step
+    return False
+
+
+def _knight_attacker(position: Position, target_row: int, target_col: int, attacker_side: str) -> bool:
+    for row_delta, col_delta in (
+        (1, 2), (1, -2), (-1, 2), (-1, -2),
+        (2, 1), (2, -1), (-2, 1), (-2, -1),
+    ):
+        row, col = target_row - row_delta, target_col - col_delta
+        piece = _piece_at(position, row, col)
+        if piece is None or not _own_piece(piece, attacker_side) or piece.upper() != "N":
+            continue
+        leg_row = row + (row_delta // 2 if abs(row_delta) == 2 else 0)
+        leg_col = col + (col_delta // 2 if abs(col_delta) == 2 else 0)
+        if _piece_at(position, leg_row, leg_col) is None:
+            return True
+    return False
+
+
+def _soldier_attacker(position: Position, target_row: int, target_col: int, attacker_side: str) -> bool:
+    forward = 1 if attacker_side == "w" else -1
+    row = target_row - forward
+    piece = _piece_at(position, row, target_col)
+    if piece is not None and _own_piece(piece, attacker_side) and piece.upper() == "P":
+        return True
+    target_has_crossed = target_row >= 5 if attacker_side == "w" else target_row <= 4
+    if target_has_crossed:
+        for col in (target_col - 1, target_col + 1):
+            piece = _piece_at(position, target_row, col)
+            if piece is not None and _own_piece(piece, attacker_side) and piece.upper() == "P":
+                return True
+    return False
+
+
 def is_in_check(position: Position, side: str) -> bool:
     king_row, king_col = _king_square(position, side)
-    enemy_side = "b" if side == "w" else "w"
-    for row in range(BOARD_ROWS):
-        for col in range(BOARD_COLS):
-            piece = _piece_at(position, row, col)
-            if piece is None or not _own_piece(piece, enemy_side):
-                continue
-            for move in _piece_moves(position, row, col, piece):
-                end_row, end_col = index_to_coord(move.end)
-                if (end_row, end_col) == (king_row, king_col):
-                    return True
-    return False
+    attacker_side = "b" if side == "w" else "w"
+    for row_step, col_step in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        if _ray_attacker(position, king_row, king_col, row_step, col_step, attacker_side, {"R"}):
+            return True
+        if _cannon_attacker(position, king_row, king_col, row_step, col_step, attacker_side):
+            return True
+    for row_step in (1, -1):
+        if _ray_attacker(position, king_row, king_col, row_step, 0, attacker_side, {"K"}):
+            return True
+    if _knight_attacker(position, king_row, king_col, attacker_side):
+        return True
+    return _soldier_attacker(position, king_row, king_col, attacker_side)
 
 
 def attacking_targets(position: Position, side: str) -> set[tuple[int, int, str]]:
@@ -337,6 +413,10 @@ def legal_moves(position: Position) -> list[Move]:
 
     legal: list[Move] = []
     for move in candidates:
+        end_row, end_col = index_to_coord(move.end)
+        target = _piece_at(position, end_row, end_col)
+        if target is not None and target.upper() == "K":
+            continue
         next_position = apply_move(position, move)
         if not is_in_check(next_position, position.side_to_move):
             legal.append(move)

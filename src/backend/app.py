@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 import shutil
 import subprocess
 import threading
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from flask import Flask, jsonify, redirect, request, send_from_directory
+from backend.opening_book import curated_opening_positions
 
 from backend.game.engine import (
     START_FEN,
@@ -261,10 +263,20 @@ def _resolve_model(model_id: Any) -> Path:
     return candidate
 
 
+def _select_initial_fen(payload: dict[str, Any], opening_positions: tuple[str, ...]) -> str:
+    requested_fen = payload.get("fen")
+    if isinstance(requested_fen, str) and requested_fen.strip():
+        return requested_fen
+    if not opening_positions:
+        return START_FEN
+    return random.choice(opening_positions)
+
+
 def create_app(dev_web_url: str | None = None) -> Flask:
     app = Flask(__name__)
     games: dict[str, WebGame] = {}
     lock = threading.Lock()
+    opening_positions = curated_opening_positions()
 
     def cleanup_games() -> None:
         while True:
@@ -296,7 +308,6 @@ def create_app(dev_web_url: str | None = None) -> Flask:
         name: str,
         model_id: Any,
         *,
-        sample_moves: bool = False,
         mcts_time_seconds: float = 0.0,
     ) -> Any:
         from backend.game.players import ModelPlayer, PikafishPlayer
@@ -308,7 +319,6 @@ def create_app(dev_web_url: str | None = None) -> Flask:
             name=name,
             checkpoint=_resolve_model(model_id),
             device=preferred_device,
-            sampling_temperature=0.3 if sample_moves else None,
             mcts_time_seconds=mcts_time_seconds,
         )
 
@@ -323,7 +333,6 @@ def create_app(dev_web_url: str | None = None) -> Flask:
         if mode not in {"human-model", "model-model"}:
             return jsonify({"error": "invalid mode"}), 400
         human_side = payload.get("human_side", "w")
-        fen = payload.get("fen", START_FEN)
         model = payload.get("model")
         red_model = payload.get("red_model")
         black_model = payload.get("black_model")
@@ -335,6 +344,7 @@ def create_app(dev_web_url: str | None = None) -> Flask:
             return jsonify({"error": "mcts_time_seconds must be one of 0, 1, 3, 5, 10"}), 400
 
         try:
+            fen = _select_initial_fen(payload, opening_positions)
             position = parse_fen(fen)
             players: dict[str, Any]
             if mode == "human-model":
@@ -347,8 +357,8 @@ def create_app(dev_web_url: str | None = None) -> Flask:
                 }
             else:
                 players = {
-                    "w": create_model("RedModel", red_model, sample_moves=True, mcts_time_seconds=mcts_time_seconds),
-                    "b": create_model("BlackModel", black_model, sample_moves=True, mcts_time_seconds=mcts_time_seconds),
+                    "w": create_model("RedModel", red_model, mcts_time_seconds=mcts_time_seconds),
+                    "b": create_model("BlackModel", black_model, mcts_time_seconds=mcts_time_seconds),
                 }
                 human_side = None
         except Exception as error:

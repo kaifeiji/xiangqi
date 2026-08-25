@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.game.engine import Move, apply_move, is_theoretical_draw, legal_moves, move_to_iccs, parse_fen, resets_natural_limit
+from backend.game.engine import Move, apply_move, is_in_check, is_theoretical_draw, legal_moves, move_to_iccs, parse_fen, resets_natural_limit
 
 
 def test_start_position_has_expected_legal_moves() -> None:
@@ -17,6 +17,34 @@ def test_legal_moves_filter_out_facing_kings_exposure() -> None:
     moves = {move_to_iccs(move) for move in legal_moves(position)}
     assert "E1-D1" not in moves
     assert "E1-E2" in moves
+
+
+def test_legal_moves_never_capture_a_king() -> None:
+    position = parse_fen("4k4/9/9/9/9/9/9/9/4R4/4K4 w - - 0 1")
+
+    assert "E1-E9" not in {move_to_iccs(move) for move in legal_moves(position)}
+
+
+def test_legal_moves_filter_out_king_move_next_to_crossed_pawn() -> None:
+    position = parse_fen("3k5/9/9/9/9/9/9/9/3p5/4K4 w - - 0 1")
+    moves = {move_to_iccs(move) for move in legal_moves(position)}
+
+    assert "E0-E1" not in moves
+
+
+def test_legal_moves_filter_out_general_facing_the_other_king() -> None:
+    position = parse_fen("3k5/9/9/9/9/9/9/9/9/4K4 b - - 0 1")
+    moves = {move_to_iccs(move) for move in legal_moves(position)}
+
+    assert "D9-E9" not in moves
+
+
+def test_crossed_pawn_does_not_attack_diagonally() -> None:
+    red_pawn_position = parse_fen("9/9/9/9/4k4/3P5/9/9/9/8K w - - 0 1")
+    black_pawn_position = parse_fen("4k4/9/4a4/3p5/4K4/9/9/9/9/9 b - - 0 1")
+
+    assert not is_in_check(red_pawn_position, "b")
+    assert not is_in_check(black_pawn_position, "w")
 
 
 def test_natural_limit_resets_on_capture_or_pawn_crossing() -> None:
@@ -189,7 +217,7 @@ def test_model_player_respects_legal_move_mask() -> None:
     assert move == Move(13, 22)
 
 
-def test_model_player_samples_only_legal_top_k_moves() -> None:
+def test_model_player_selects_legal_move_with_flat_logits() -> None:
     torch = pytest.importorskip("torch")
     nn = torch.nn
     from backend.game.players import ModelPlayer
@@ -203,13 +231,7 @@ def test_model_player_samples_only_legal_top_k_moves() -> None:
             )
 
     position = parse_fen("4k4/9/9/9/9/9/9/9/4R4/4K4 w - - 0 1")
-    player = ModelPlayer(
-        name="Sampled",
-        model=_FlatModel(),
-        device=torch.device("cpu"),
-        sampling_temperature=0.3,
-        sampling_top_k=5,
-    )
+    player = ModelPlayer(name="Deterministic", model=_FlatModel(), device=torch.device("cpu"))
     legal = {(move.start, move.end) for move in legal_moves(position)}
 
     for _ in range(10):

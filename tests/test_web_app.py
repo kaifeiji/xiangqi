@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from pathlib import Path, WindowsPath
 
 import pytest
@@ -77,3 +76,33 @@ def test_model_player_loads_training_checkpoint_with_windows_path_metadata(tmp_p
     player = ModelPlayer.from_checkpoint(name="Model", checkpoint=checkpoint_path)
 
     assert isinstance(player.model, ResNet)
+
+
+def test_select_initial_fen_uses_opening_pool_by_default() -> None:
+    pytest.importorskip("flask")
+    import backend.app as app_module
+
+    openings = (
+        "1Cbakabnr/9/rc5c1/p1p1p1p1p/9/2P6/P3P1P1P/7C1/9/RNBAKABNR b - - 2 2",
+    )
+    fen = app_module._select_initial_fen({}, openings)
+
+    assert fen == openings[0]
+
+
+def test_select_initial_fen_falls_back_to_start_fen_without_opening_pool() -> None:
+    pytest.importorskip("flask")
+    import backend.app as app_module
+
+    assert app_module._select_initial_fen({}, ()) == app_module.START_FEN
+
+
+def test_curated_opening_positions_are_non_empty_and_black_to_move() -> None:
+    pytest.importorskip("flask")
+    import backend.opening_book as opening_book_module
+
+    positions = opening_book_module.curated_opening_positions()
+
+    assert positions
+    assert len(positions) < 44
+    assert all(position.split()[1] == "b" for position in positions)

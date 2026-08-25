@@ -124,13 +124,9 @@ class ModelPlayer:
     name: str
     model: nn.Module
     device: torch.device
-    sampling_temperature: float | None = None
-    sampling_top_k: int = 5
     current_view: bool = False
     value_head: bool = False
     mcts_time_seconds: float = 0.0
-    opening_plies: int = 2
-    opening_temperature: float = 0.5
 
     @classmethod
     def from_checkpoint(
@@ -139,15 +135,9 @@ class ModelPlayer:
         name: str,
         checkpoint: str | Path | None = None,
         device: str = "cpu",
-        sampling_temperature: float | None = None,
-        sampling_top_k: int = 5,
         current_view: bool | None = None,
         mcts_time_seconds: float = 0.0,
     ) -> "ModelPlayer":
-        if sampling_temperature is not None and sampling_temperature <= 0:
-            raise ValueError("sampling_temperature must be positive")
-        if sampling_top_k < 1:
-            raise ValueError("sampling_top_k must be positive")
         if mcts_time_seconds < 0:
             raise ValueError("mcts_time_seconds must be non-negative")
         resolved_device = torch.device(device)
@@ -181,8 +171,6 @@ class ModelPlayer:
             name=name,
             model=model,
             device=resolved_device,
-            sampling_temperature=sampling_temperature,
-            sampling_top_k=sampling_top_k,
             current_view=current_view,
             value_head=value_head,
             mcts_time_seconds=mcts_time_seconds if value_head else 0.0,
@@ -247,9 +235,7 @@ class ModelPlayer:
             policy_value=policy_value,
             terminal_value=terminal_value,
         )
-        opening_ply = max(len(position_counts or {}) - 1, 0)
-        temperature = self.opening_temperature if opening_ply < self.opening_plies else 0.0
-        return search.search(position, self.mcts_time_seconds, root_temperature=temperature)
+        return search.search(position, self.mcts_time_seconds, root_temperature=0.0)
 
     def _choose_policy_move(self, position: Position, position_counts: dict[Position, int] | None = None) -> Move:
         legal = legal_moves(position)
@@ -287,20 +273,7 @@ class ModelPlayer:
                         fresh_mask[0, model_start * 90 + model_end] = False
                 if fresh_mask.any():
                     masked = masked.masked_fill(~fresh_mask, torch.finfo(masked.dtype).min)
-            opening_ply = max(len(position_counts or {}) - 1, 0)
-            temperature = (
-                self.opening_temperature
-                if opening_ply < self.opening_plies
-                else self.sampling_temperature
-            )
-            if temperature is None:
-                selected = int(masked.argmax(dim=1).item())
-            else:
-                candidate_count = min(self.sampling_top_k, len(legal))
-                candidate_logits, candidate_indices = masked.topk(candidate_count, dim=1)
-                probabilities = torch.softmax(candidate_logits / temperature, dim=1)
-                sampled_rank = int(torch.multinomial(probabilities, 1).item())
-                selected = int(candidate_indices[0, sampled_rank].item())
+            selected = int(masked.argmax(dim=1).item())
         model_move = Move(selected // 90, selected % 90)
         move = (
             Move(current_view_index(model_move.start), current_view_index(model_move.end))

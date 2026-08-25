@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,7 @@ from backend.game.engine import (  # noqa: E402
     resets_natural_limit,
 )
 from backend.game.players import ModelPlayer  # noqa: E402
+from backend.opening_book import curated_opening_positions  # noqa: E402
 
 
 NATURAL_LIMIT_PLIES = 120
@@ -121,8 +123,6 @@ def build_player(name: str, checkpoint: Path, args: argparse.Namespace) -> Model
         name=name,
         checkpoint=checkpoint,
         device=args.device,
-        sampling_temperature=args.temperature,
-        sampling_top_k=args.top_k,
         mcts_time_seconds=args.mcts_time,
     )
 
@@ -134,9 +134,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--games", type=int, default=100, help="对弈盘数，默认 100")
     parser.add_argument("--device", default="cpu", help="PyTorch device，默认 cpu")
     parser.add_argument("--mcts-time", type=float, default=0.0, help="每步 MCTS 秒数，默认关闭")
-    parser.add_argument("--temperature", type=float, default=None, help="策略采样温度，默认贪心")
-    parser.add_argument("--top-k", type=int, default=5, help="策略采样候选数，默认 5")
-    parser.add_argument("--fen", default=START_FEN, help="初始局面 FEN")
+    parser.add_argument("--fen", help="初始局面 FEN；不提供时默认随机主流开局")
     parser.add_argument("--same-colors", action="store_true", help="不交换双方颜色")
     parser.add_argument("--verbose", action="store_true", help="输出每盘结果")
     parser.add_argument(
@@ -150,8 +148,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("--games must be positive")
     if args.mcts_time < 0:
         parser.error("--mcts-time must be non-negative")
-    if args.top_k < 1:
-        parser.error("--top-k must be positive")
     return args
 
 
@@ -164,6 +160,9 @@ def main() -> None:
 
     model_a = build_player("Model A", args.model_a, args)
     model_b = build_player("Model B", args.model_b, args)
+    openings = curated_opening_positions()
+    if not openings:
+        openings = (START_FEN,)
     scores = {"model_a": 0, "model_b": 0, "draw": 0}
     draw_reasons: dict[str, int] = {}
     game_results: list[dict[str, object]] = []
@@ -171,7 +170,8 @@ def main() -> None:
     for game_number in range(1, args.games + 1):
         a_is_red = args.same_colors or game_number % 2 == 1
         red, black = (model_a, model_b) if a_is_red else (model_b, model_a)
-        result = play_game(red, black, args.fen)
+        game_fen = args.fen if args.fen else random.choice(openings)
+        result = play_game(red, black, game_fen)
         if result.startswith("draw_"):
             winner = "draw"
             draw_reasons[result] = draw_reasons.get(result, 0) + 1
@@ -185,6 +185,7 @@ def main() -> None:
                 "game": game_number,
                 "red": red.name,
                 "black": black.name,
+                "fen": game_fen,
                 "result": result,
                 "winner": winner,
             }
@@ -196,11 +197,9 @@ def main() -> None:
         "model_a": str(args.model_a),
         "model_b": str(args.model_b),
         "games": args.games,
-        "fen": args.fen,
+        "fen": args.fen or "random_curated_opening",
         "same_colors": args.same_colors,
         "mcts_time_seconds": args.mcts_time,
-        "temperature": args.temperature,
-        "top_k": args.top_k,
         "summary": {
             "model_a_wins": scores["model_a"],
             "model_b_wins": scores["model_b"],
