@@ -8,6 +8,7 @@ import time
 from bisect import bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -339,12 +340,15 @@ def main() -> int:
     parser.add_argument("--value-scale", type=float, default=300.0)
     parser.add_argument("--policy-weight", type=float, default=1.0)
     parser.add_argument("--value-weight", type=float, default=0.5)
+    parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--block-size", type=int, default=65536)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-steps", type=int)
-    parser.add_argument("--warmup-ratio", type=float, default=0.05)
+    warmup = parser.add_mutually_exclusive_group()
+    warmup.add_argument("--warmup-ratio", type=float, default=0.05)
+    warmup.add_argument("--warmup-steps", type=int)
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
 
@@ -358,8 +362,12 @@ def main() -> int:
         parser.error("--min-learning-rate must be <= --learning-rate")
     if args.policy_weight < 0 or args.value_weight < 0:
         parser.error("loss weights must be non-negative")
+    if args.max_grad_norm <= 0:
+        parser.error("--max-grad-norm must be positive")
     if not 0 <= args.warmup_ratio < 1:
         parser.error("--warmup-ratio must be in [0, 1)")
+    if args.warmup_steps is not None and args.warmup_steps < 1:
+        parser.error("--warmup-steps must be positive")
     if args.num_workers < 0 or args.prefetch_factor < 1:
         parser.error("num-workers must be non-negative and prefetch-factor must be positive")
 
@@ -401,7 +409,9 @@ def main() -> int:
     updates_per_epoch = math.ceil(len(train_loader) / accumulation_steps)
     total_steps = args.epochs * updates_per_epoch
     target_steps = min(total_steps, args.max_steps) if args.max_steps is not None else total_steps
-    warmup_steps = max(1, math.ceil(total_steps * args.warmup_ratio))
+    warmup_steps = args.warmup_steps if args.warmup_steps is not None else max(1, math.ceil(total_steps * args.warmup_ratio))
+    if warmup_steps >= total_steps:
+        parser.error("warmup steps must be less than total training steps")
 
     def learning_rate_scale(step: int) -> float:
         if step < warmup_steps:
@@ -456,6 +466,7 @@ def main() -> int:
     last_update_time = train_started
     average_update_seconds = 0.0
     timed_updates = 0
+    last_gradient_norm = 0.0
     start_epoch_index = 0
     start_batch_index = 0
     start_epoch_update_step = 0
@@ -518,10 +529,17 @@ def main() -> int:
                 scaler.scale(loss / accumulation_steps).backward()
                 should_update = (batch_index + 1) % accumulation_steps == 0 or batch_index + 1 == len(train_loader)
                 if should_update:
+                    scaler.unscale_(optimizer)
+                    last_gradient_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm))
+                    gradient_was_clipped = last_gradient_norm > args.max_grad_norm
+                    amp_scale_before_update = scaler.get_scale()
                     scaler.step(optimizer)
                     scaler.update()
-                    scheduler.step()
+                    optimizer_step_applied = not amp_enabled or scaler.get_scale() >= amp_scale_before_update
                     optimizer.zero_grad(set_to_none=True)
+                    if not optimizer_step_applied:
+                        continue
+                    scheduler.step()
                     global_step += 1
                     epoch_update_step += 1
                     now = time.perf_counter()
@@ -536,36 +554,30 @@ def main() -> int:
                         or batch_index + 1 == len(train_loader)
                     )
                     if should_log:
-                        elapsed_seconds = now - train_started
-                        remaining_steps = max(target_steps - global_step, 0)
-                        eta_seconds = remaining_steps * average_update_seconds
-                        samples_seen = global_step * args.global_batch_size
-                        gpu_memory = {}
-                        if device.type == "cuda":
-                            gpu_memory = {
-                                "gpu_memory_allocated_bytes": torch.cuda.memory_allocated(device),
-                                "gpu_memory_reserved_bytes": torch.cuda.memory_reserved(device),
-                                "gpu_memory_peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
-                            }
+                        epoch_elapsed_seconds = now - started
+                        epoch_remaining_updates = max(updates_per_epoch - epoch_update_step, 0)
+                        value_outputs = value_predictions.detach().float().reshape(-1)
                         emit_log({
                             "event": "train_progress",
+                            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                             "epoch": epoch + 1,
                             "global_step": global_step,
-                            "target_steps": target_steps,
-                            "epoch_update": epoch_update_step,
-                            "updates_per_epoch": updates_per_epoch,
                             "epoch_progress": epoch_update_step / updates_per_epoch,
-                            "samples_seen": samples_seen,
-                            "step_seconds": update_seconds,
-                            "avg_step_seconds": average_update_seconds,
-                            "timed_updates": timed_updates,
-                            "positions_per_second": args.global_batch_size / update_seconds,
-                            "avg_positions_per_second": args.global_batch_size / average_update_seconds,
-                            "elapsed_seconds": elapsed_seconds,
-                            "eta_seconds": eta_seconds,
+                            "epoch_elapsed_seconds": epoch_elapsed_seconds,
+                            "epoch_eta_seconds": epoch_remaining_updates * average_update_seconds,
                             "learning_rate": optimizer.param_groups[0]["lr"],
                             "value_learning_rate": optimizer.param_groups[1]["lr"],
-                            **gpu_memory,
+                            "joint_loss": float(loss),
+                            "policy_loss": float(losses["policy_loss"]),
+                            "value_loss": float(losses["value_loss"]),
+                            "cp_policy_kl": float(losses["cp_policy_kl"]),
+                            "policy_valid_count": int(losses["policy_valid"].sum()),
+                            "value_valid_count": int(losses["value_valid"].sum()),
+                            "mate_policy_count": int(losses["mate_policy"].sum()),
+                            "value_prediction_mean": float(value_outputs.mean()),
+                            "value_saturation_ratio": float((value_outputs.abs() >= 0.99).float().mean()),
+                            "gradient_norm_pre_clip": last_gradient_norm,
+                            "gradient_clipped": gradient_was_clipped,
                         })
                 if args.max_steps is not None and global_step >= args.max_steps:
                     interrupted_mid_epoch = batch_index + 1 < len(train_loader)
@@ -605,6 +617,7 @@ def main() -> int:
                 "no_improve_epochs": no_improve_epochs,
                 "learning_rate": optimizer.param_groups[0]["lr"], "epoch_seconds": time.perf_counter() - started,
                 "value_learning_rate": optimizer.param_groups[1]["lr"],
+                "gradient_norm_pre_clip": last_gradient_norm,
             })
             if args.max_steps is not None and global_step >= args.max_steps:
                 break

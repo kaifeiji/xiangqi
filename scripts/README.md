@@ -624,7 +624,7 @@ $$
 2. 结构性候选是先空间池化再做小 MLP，避免高维 flatten value head。
 3. 每个候选先跑 `20/100/200` updates，记录 value 的 pre-tanh、`abs(value)>=0.99` 比例、原始 cp-MAE 和 policy KL；所有 value 输出保持非饱和后才允许跑完整 epoch。
 
-已实现的候选参数组为 `main/policy=4e-4`、`value_head=1e-5`。真实 `50`-update smoke（`micro/global=2048/4096`、workers=`8`）得到 cp-policy KL=`1.7247`、value cp-MAE=`69.80`、$J_{\mathrm{select}}=0.9784`，没有出现饱和。当前学习率调度将两个参数组乘以相同的 warmup/cosine scale：主干的末端 LR 是 `1e-5`，value head 的末端 LR 为 $1e-5\times(1e-5/4e-4)=2.5e-7$。该结果只证明早期稳定性；跨 warmup 的 `100/200`-update 复测仍是放行全量训练的前置条件。
+已实现的候选参数组为 `main/policy=4e-4`、`value_head=1e-5`。真实 `50`-update smoke（`micro/global=2048/4096`、workers=`8`）得到 cp-policy KL=`1.7247`、value cp-MAE=`69.80`、$J_{\mathrm{select}}=0.9784`，没有出现饱和。当前学习率调度将两个参数组乘以相同的 warmup/cosine scale：主干的末端 LR 是 `1e-5`，value head 的末端 LR 为 $1e-5\times(1e-5/4e-4)=2.5e-7$。候选使用固定 `110` 个 warmup steps，避免 `--epochs` 改变时按比例 warmup 变成多个 epoch。该结果只证明早期稳定性；跨 warmup 的 `100/200`-update 复测仍是放行全量训练的前置条件。
 
 候选短 smoke 命令：
 
@@ -632,7 +632,7 @@ $$
 uv run python scripts\train_pikafish.py `
   --epochs 1 --max-steps 50 `
   --learning-rate 4e-4 --value-learning-rate 1e-5 --min-learning-rate 1e-5 `
-  --warmup-ratio 0.05 --weight-decay 1e-4 `
+  --warmup-steps 110 --weight-decay 1e-4 `
   --temperature 100 --value-scale 300 --policy-weight 1 --value-weight 0.5 `
   --micro-batch-size 2048 --global-batch-size 4096 `
   --num-workers 8 --prefetch-factor 4 --seed 42 `
