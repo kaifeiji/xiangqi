@@ -40,6 +40,7 @@ uv run python scripts\unify_format.py `
   --pgn data\raw\dpxq-99813games.pgns data\raw\WXF-41743games.pgns `
   --book-input-dir data\raw\xqp `
   --output data\processed\human_games `
+  --split-ratio 98:1:1 `
   --shard-size 8192
 ```
 
@@ -50,11 +51,12 @@ uv run python scripts\unify_format.py `
   --pgn data\raw\dpxq-99813games.pgns data\raw\WXF-41743games.pgns `
   --book-input-dir data\raw\xqp `
   --output data\processed\human_games `
+  --split-ratio 98:1:1 `
   --shard-size 8192 `
   --resume
 ```
 
-`--max-games 1 --shard-size 1` 可用于小规模 smoke。统一阶段不调用 Pikafish，也不展开逐 ply 样本。
+默认按棋局 ID 哈希稳定划分为 train/validation/test = `98:1:1`，可用 `--split-ratio TRAIN:VALIDATION:TEST` 自定义比例。`--max-games 1 --shard-size 1` 可用于小规模 smoke。
 
 ### 去重与来源
 
@@ -62,7 +64,7 @@ uv run python scripts\unify_format.py `
 
 ## 棋局输赢作为 value
 
-统一 JSONL 生成后，`prepare_data.py` 读取文件或 shard 目录，生成最终策略训练 NPY：
+统一 JSONL 生成后，`prepare_data.py` 读取文件或 shard 目录，生成最终训练 NPY：
 
 ```powershell
 uv run python scripts\prepare_data.py `
@@ -138,6 +140,8 @@ uv run python scripts\prepare_current_view.py `
 镜像会使该 batch 的实际前向/反向样本数加倍，因此显存和训练时间也随之增加；`--batch-size` 应按未镜像样本理解。该开关当前只适用于 `train.py` 的 start/end policy 标签。`train_pikafish.py` 尚未实现 `--mirror`，不能在蒸馏训练命令中假设存在该数据增强。
 
 ## Pikafish 标注 value
+
+Pikafish 路径参考仓库根目录的 [`.env.example`](../.env.example)。复制为 `.env.local` 后，`annotate_pikafish.py` 与 `benchmark_pikafish.py` 会读取其中的路径变量。
 
 ### Pikafish CPU 内置 benchmark
 

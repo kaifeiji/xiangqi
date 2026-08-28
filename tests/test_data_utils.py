@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 
-from data_utils import apply_move, current_view_index, current_view_position, encode_fen, iccs_to_indices, indices_to_iccs, iter_unified_games
+from data_utils import apply_move, current_view_index, current_view_position, encode_fen, iccs_to_indices, indices_to_iccs, iter_unified_games, split_for
 
 
 STARTING_FEN = "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1"
@@ -37,6 +37,14 @@ def test_iter_unified_games_reads_one_record_per_line(tmp_path: Path) -> None:
     path.write_text(json.dumps(record) + "\n", encoding="utf-8")
 
     assert list(iter_unified_games(path)) == [record]
+
+
+def test_split_for_supports_custom_ratios() -> None:
+    game_ids = [f"game-{index}" for index in range(200)]
+
+    assert {split_for(game_id, (1, 0, 0)) for game_id in game_ids} == {"train"}
+    assert {split_for(game_id, (0, 1, 0)) for game_id in game_ids} == {"validation"}
+    assert {split_for(game_id, (0, 0, 1)) for game_id in game_ids} == {"test"}
 
 
 def test_current_view_rotates_black_position_move_and_side_channel() -> None:

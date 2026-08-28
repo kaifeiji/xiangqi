@@ -15,7 +15,7 @@ from typing import Any, Iterable, Iterator
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from data_utils import apply_move, encode_fen, iccs_to_indices, indices_to_iccs, split_for, validate_fen
+from data_utils import DEFAULT_SPLIT_RATIOS, apply_move, encode_fen, iccs_to_indices, indices_to_iccs, split_for, validate_fen
 from data_utils import EXCLUDED_GAMES
 from data_utils import VALID_OR_UNKNOWN_GAME_RESULTS
 from data_utils import iter_games
@@ -279,6 +279,21 @@ def remove_stale_temporary_files(output: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def parse_split_ratio(value: str) -> tuple[int, int, int]:
+    parts = value.replace(",", ":").split(":")
+    if len(parts) != 3:
+        raise argparse.ArgumentTypeError("expected TRAIN:VALIDATION:TEST, for example 98:1:1")
+    try:
+        train_ratio, validation_ratio, test_ratio = (int(part) for part in parts)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("split ratios must be integers") from error
+    if train_ratio < 0 or validation_ratio < 0 or test_ratio < 0:
+        raise argparse.ArgumentTypeError("split ratios must be non-negative")
+    if train_ratio + validation_ratio + test_ratio <= 0:
+        raise argparse.ArgumentTypeError("at least one split ratio must be positive")
+    return train_ratio, validation_ratio, test_ratio
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Normalize PGN and xqp games into one per-game JSONL format."
@@ -288,6 +303,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path("data/processed/human_games"))
     parser.add_argument("--max-games", type=int, help="limit normalized games for a smoke test")
     parser.add_argument("--shard-size", type=int, default=8192, help="games per split JSONL shard")
+    parser.add_argument("--split-ratio", type=parse_split_ratio, default=DEFAULT_SPLIT_RATIOS, metavar="TRAIN:VALIDATION:TEST", help="train/validation/test split ratio, default: 98:1:1")
     parser.add_argument("--resume", action="store_true", help="append only games not already in the output")
     parser.add_argument("--log-level", choices=("DEBUG", "INFO", "WARNING", "ERROR"), default="INFO")
     args = parser.parse_args()
@@ -348,7 +364,7 @@ def main() -> int:
                 if duplicates == 1 or duplicates % 1000 == 0:
                     LOGGER.info("Duplicate games found: %d", duplicates)
                 continue
-            split = split_for(game_id)
+            split = split_for(game_id, args.split_ratio)
             record["split"] = split
             buffers[split].append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
             written_ids.add(game_id)
@@ -370,6 +386,7 @@ def main() -> int:
         "written_games": written,
         "duplicates": duplicates,
         "resumed_games": resumed,
+        "split_ratio": {"train": args.split_ratio[0], "validation": args.split_ratio[1], "test": args.split_ratio[2]},
         "shards": {split: shard_numbers[split] for split in shard_numbers},
         "counts": dict(stats),
     }

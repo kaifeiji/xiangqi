@@ -24,6 +24,7 @@ BLACK_WIN_RESULT = "0-1"
 DRAW_RESULT = "1/2-1/2"
 VALID_GAME_RESULTS = {RED_WIN_RESULT, BLACK_WIN_RESULT, DRAW_RESULT}
 VALID_OR_UNKNOWN_GAME_RESULTS = VALID_GAME_RESULTS | {"*"}
+DEFAULT_SPLIT_RATIOS = (98, 1, 1)
 EXCLUDED_GAMES = {
     ("dpxq-99813games.pgns", 7097),
     ("dpxq-99813games.pgns", 7106),
@@ -557,9 +558,17 @@ def complete_move_topk(start_logits, end_logits, starts, ends):
     }
 
 
-def split_for(game_id: str) -> str:
-    bucket = int(hashlib.sha256(game_id.encode()).hexdigest()[:8], 16) % 100
-    return "train" if bucket < 80 else "validation" if bucket < 90 else "test"
+def split_for(game_id: str, split_ratios: tuple[int, int, int] = DEFAULT_SPLIT_RATIOS) -> str:
+    train_ratio, validation_ratio, test_ratio = split_ratios
+    total = train_ratio + validation_ratio + test_ratio
+    if total <= 0 or train_ratio < 0 or validation_ratio < 0 or test_ratio < 0:
+        raise ValueError("split ratios must be non-negative and have a positive sum")
+    bucket = int(hashlib.sha256(game_id.encode()).hexdigest()[:8], 16) % total
+    if bucket < train_ratio:
+        return "train"
+    if bucket < train_ratio + validation_ratio:
+        return "validation"
+    return "test"
 
 
 def iter_unified_games(path: Path) -> Iterator[dict[str, object]]:
