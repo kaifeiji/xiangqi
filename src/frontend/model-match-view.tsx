@@ -23,7 +23,7 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
   const [startingGame, setStartingGame] = useState(false)
   const [thinking, setThinking] = useState(false)
   const [autoPlay, setAutoPlay] = useState(true)
-  const [mctsTimeSeconds, setMctsTimeSeconds] = useState(0)
+  const [mctsSimulations, setMctsSimulations] = useState(0)
   const announcedResult = useRef<string | undefined>(undefined)
 
   useEffect(() => {
@@ -59,10 +59,11 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
       announcedResult.current = undefined
       const nextGame = await request<Game>('/api/games', {
         method: 'POST',
-        body: JSON.stringify({ mode: 'model-model', red_model: redModel, black_model: blackModel, mcts_time_seconds: mctsTimeSeconds }),
+        body: JSON.stringify({ mode: 'model-model', red_model: redModel, black_model: blackModel, mcts_simulations: mctsSimulations }),
       })
       setGame(nextGame)
       setSnapshots([nextGame])
+      setPosition(0)
     } catch (startError) {
       setError(startError instanceof Error ? startError.message : String(startError))
     } finally {
@@ -143,16 +144,15 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
               {models.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
             </select>
           </label>
-          <label>
-            MCTS时间
-            <select value={String(mctsTimeSeconds)} onChange={(event) => setMctsTimeSeconds(Number(event.target.value))} disabled={startingGame || Boolean(game)}>
-              <option value="0">不加 MCTS</option>
-              <option value="1">1 秒</option>
-              <option value="3">3 秒</option>
-              <option value="5">5 秒</option>
-              <option value="10">10 秒</option>
-            </select>
-          </label>
+          {!(redModel === 'pikafish' && blackModel === 'pikafish') && <label>
+              MCTS模拟
+              <select value={String(mctsSimulations)} onChange={(event) => setMctsSimulations(Number(event.target.value))} disabled={startingGame || Boolean(game)}>
+                <option value="0">0次</option>
+                <option value="1000">1000次</option>
+                <option value="5000">5000次</option>
+                <option value="10000">10000次</option>
+              </select>
+            </label>}
           {!game && <button type="button" onClick={() => void startGame()} disabled={startingGame || !modelsLoaded || !models.length}>
             {startingGame ? '创建中...' : '开始新对局'}
           </button>}
@@ -167,6 +167,7 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
           archiveHumanSide={null}
           currentIndex={position}
           onNavigate={navigateReplay}
+          keyboardNavigationEnabled={active}
         />
       </div>
     </section>

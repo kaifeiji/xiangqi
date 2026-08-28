@@ -48,6 +48,32 @@ export function boardToFen(position: BoardCell[][]): string {
     .join('/')
 }
 
+export function fenToBoard(fen: string): BoardCell[][] {
+  const rows = fen.split(' ')[0].split('/')
+  return rows.map((row, rowIndex) => {
+    const cells: BoardCell[] = []
+    for (const token of row) {
+      if (/\d/.test(token)) {
+        for (let index = 0; index < Number(token); index += 1) cells.push({ piece: null, square: `${String.fromCharCode(65 + cells.length)}${9 - rowIndex}` })
+      } else {
+        cells.push({ piece: token, square: `${String.fromCharCode(65 + cells.length)}${9 - rowIndex}` })
+      }
+    }
+    return cells
+  })
+}
+
+export function piecesToBoard(pieces: Array<string | null>): BoardCell[][] {
+  if (pieces.length !== 90) throw new Error('棋盘数据无效')
+  return Array.from({ length: 10 }, (_, displayRow) => {
+    const row = 9 - displayRow
+    return Array.from({ length: 9 }, (_, col) => ({
+      piece: pieces[row * 9 + col] ?? null,
+      square: `${String.fromCharCode(65 + col)}${row}`,
+    }))
+  })
+}
+
 export function legalDests(moves: string[]): Map<Key, Key[]> {
   const destinations = new Map<Key, Key[]>()
   for (const move of moves) {

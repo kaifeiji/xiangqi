@@ -1,3 +1,5 @@
+import { piecesToBoard } from './game-utils'
+
 export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
@@ -7,5 +9,8 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     throw new Error(payload.error ?? '请求失败')
   }
-  return payload
+  if ('board' in payload && Array.isArray(payload.board) && payload.board.length === 90) {
+    return { ...payload, board: piecesToBoard(payload.board as Array<string | null>) } as T
+  }
+  return payload as T
 }

@@ -17,8 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(ROOT / "src"))
 
 from annotate_pikafish import SCHEMA_VERSION, iter_annotation_records
-from backend.game.engine import iccs_to_move, legal_moves, parse_fen
-from data_utils import PIECE_CHANNELS, current_view_index, current_view_position
+from data_utils import PIECE_CHANNELS, current_view_index, current_view_position, iccs_to_move, legal_moves, parse_fen
 
 
 SPLITS = ("train", "validation", "test")

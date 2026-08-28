@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useEffectEvent, useRef } from 'react'
 import { changedMove, toIccs } from './game-utils'
-import type { Game, GameArchive, GameMode, Side } from './types'
+import { boardToFen } from './game-utils'
+import type { CompactArchiveSnapshot, Game, GameArchive, GameMode, Side } from './types'
 
 interface MoveRecordProps {
   snapshots: Game[]
@@ -10,18 +11,28 @@ interface MoveRecordProps {
   archiveHumanSide?: Side | null
   currentIndex?: number
   onNavigate?: (index: number) => void
+  keyboardNavigationEnabled?: boolean
 }
 
-export function MoveRecord({ snapshots, status, error, archiveMode, archiveHumanSide, currentIndex, onNavigate }: MoveRecordProps): React.JSX.Element {
-  const moves = snapshots.slice(1).map((snapshot, index) => {
-    const previous = snapshots[index]
+export function MoveRecord({ snapshots, status, error, archiveMode, archiveHumanSide, currentIndex, onNavigate, keyboardNavigationEnabled = false }: MoveRecordProps): React.JSX.Element {
+  const moves = snapshots.map((snapshot, index) => {
+    if (index === 0) {
+      return {
+        id: `${snapshot.game_id}-${snapshot.turn}`,
+        number: 0,
+        snapshotIndex: 0,
+        text: '初始局面',
+      }
+    }
+
+    const previous = snapshots[index - 1]
     const move = changedMove(previous.board, snapshot.board, snapshot.side_to_move)
     if (!move) return undefined
     const side = snapshot.side_to_move === 'b' ? '红方' : '黑方'
     return {
       id: `${snapshot.game_id}-${snapshot.turn}`,
-      number: index + 1,
-      snapshotIndex: index + 1,
+      number: index,
+      snapshotIndex: index,
       text: `${side} ${toIccs(move[0])}-${toIccs(move[1])}`,
     }
   }).filter((move): move is { id: string; number: number; snapshotIndex: number; text: string } => move !== undefined)
@@ -37,14 +48,39 @@ export function MoveRecord({ snapshots, status, error, archiveMode, archiveHuman
   const maxPly = Math.max(snapshots.length - 1, 0)
   const canSaveArchive = Boolean(archiveMode) && snapshots.length > 0
 
+  useEffect(() => {
+    const mctsDebug = snapshots[currentPly]?.mcts_debug
+    if (mctsDebug) console.log('[MCTS]', mctsDebug)
+  }, [currentPly, snapshots])
+
+  const navigateWithKeyboard = useEffectEvent((event: KeyboardEvent): void => {
+    if (!keyboardNavigationEnabled || !replayEnabled || !onNavigate) return
+    const nextIndex = event.key === 'ArrowLeft' ? currentPly - 1 : event.key === 'ArrowRight' ? currentPly + 1 : currentPly
+    if (nextIndex === currentPly || nextIndex < 0 || nextIndex > maxPly) return
+    event.preventDefault()
+    onNavigate(nextIndex)
+  })
+
+  useEffect(() => {
+    window.addEventListener('keydown', navigateWithKeyboard)
+    return () => window.removeEventListener('keydown', navigateWithKeyboard)
+  }, [])
+
   const saveArchive = (): void => {
     if (!archiveMode || snapshots.length === 0) return
     const archive: GameArchive = {
-      version: 1,
       savedAt: new Date().toISOString(),
       mode: archiveMode,
       humanSide: archiveHumanSide ?? null,
-      snapshots,
+      initial_fen: `${boardToFen(snapshots[0].board)} ${snapshots[0].side_to_move} - - 0 1`,
+      snapshots: snapshots.map((snapshot): CompactArchiveSnapshot => ({
+        fen: boardToFen(snapshot.board),
+        side_to_move: snapshot.side_to_move,
+        turn: snapshot.turn,
+        rule60: snapshot.rule60,
+        result: snapshot.result,
+        mcts_debug: snapshot.mcts_debug ?? null,
+      })),
     }
     const blob = new Blob([JSON.stringify(archive, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)

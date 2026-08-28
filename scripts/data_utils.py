@@ -305,6 +305,258 @@ def validate_fen(fen: str) -> list[str]:
     return errors
 
 
+@dataclass(frozen=True)
+class Move:
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class GamePosition:
+    board: tuple[tuple[str | None, ...], ...]
+    side_to_move: str
+
+
+def _game_square_to_index(square: str) -> int:
+    normalized = square.strip().upper()
+    if len(normalized) != 2 or normalized[0] not in "ABCDEFGHI" or normalized[1] not in "0123456789":
+        raise ValueError(f"invalid ICCS square: {square!r}")
+    return int(normalized[1]) * BOARD_COLS + ord(normalized[0]) - ord("A")
+
+
+def iccs_to_move(text: str) -> Move:
+    compact = text.strip().upper().replace(" ", "")
+    if len(compact) != 5 or compact[2] != "-":
+        raise ValueError(f"invalid ICCS move: {text!r}")
+    return Move(_game_square_to_index(compact[:2]), _game_square_to_index(compact[3:]))
+
+
+def parse_fen(fen: str) -> GamePosition:
+    fields = fen.split()
+    if len(fields) != 6:
+        raise ValueError("FEN must contain six fields")
+    if fields[1] not in {"w", "b"}:
+        raise ValueError("FEN side-to-move must be w or b")
+    ranks = fields[0].split("/")
+    if len(ranks) != BOARD_ROWS:
+        raise ValueError("FEN board must contain ten ranks")
+    rows: list[tuple[str | None, ...]] = []
+    for fen_rank in reversed(ranks):
+        cells: list[str | None] = []
+        for token in fen_rank:
+            if token.isdigit():
+                cells.extend([None] * int(token))
+            elif token in FEN_PIECES:
+                cells.append(token)
+            else:
+                raise ValueError(f"invalid FEN piece: {token}")
+        if len(cells) != BOARD_COLS:
+            raise ValueError("FEN row width must be 9")
+        rows.append(tuple(cells))
+    return GamePosition(tuple(rows), fields[1])
+
+
+def _game_inside(row: int, column: int) -> bool:
+    return 0 <= row < BOARD_ROWS and 0 <= column < BOARD_COLS
+
+
+def _game_own(piece: str, side: str) -> bool:
+    return piece.isupper() if side == "w" else piece.islower()
+
+
+def _game_in_palace(row: int, column: int, side: str) -> bool:
+    return column in {3, 4, 5} and row in ({0, 1, 2} if side == "w" else {7, 8, 9})
+
+
+def _game_piece(position: GamePosition, row: int, column: int) -> str | None:
+    return position.board[row][column] if _game_inside(row, column) else None
+
+
+def _game_piece_moves(position: GamePosition, row: int, column: int, piece: str) -> list[Move]:
+    side = "w" if piece.isupper() else "b"
+    start = row * BOARD_COLS + column
+    moves: list[Move] = []
+
+    def add_target(target_row: int, target_column: int) -> None:
+        if not _game_inside(target_row, target_column):
+            return
+        target = _game_piece(position, target_row, target_column)
+        if target is None or not _game_own(target, side):
+            moves.append(Move(start, target_row * BOARD_COLS + target_column))
+
+    kind = piece.upper()
+    if kind == "K":
+        for row_delta, column_delta in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            target_row, target_column = row + row_delta, column + column_delta
+            if _game_in_palace(target_row, target_column, side):
+                add_target(target_row, target_column)
+        step = 1 if side == "w" else -1
+        target_row = row + step
+        while _game_inside(target_row, column):
+            target = _game_piece(position, target_row, column)
+            if target is not None:
+                if target.upper() == "K" and not _game_own(target, side):
+                    moves.append(Move(start, target_row * BOARD_COLS + column))
+                break
+            target_row += step
+        return moves
+    if kind == "A":
+        for row_delta, column_delta in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+            target_row, target_column = row + row_delta, column + column_delta
+            if _game_in_palace(target_row, target_column, side):
+                add_target(target_row, target_column)
+        return moves
+    if kind == "B":
+        for row_delta, column_delta in ((2, 2), (2, -2), (-2, 2), (-2, -2)):
+            target_row, target_column = row + row_delta, column + column_delta
+            if not _game_inside(target_row, target_column) or _game_piece(position, row + row_delta // 2, column + column_delta // 2) is not None:
+                continue
+            if (side == "w" and target_row > 4) or (side == "b" and target_row < 5):
+                continue
+            add_target(target_row, target_column)
+        return moves
+    if kind == "N":
+        candidates = ((2, 1, 1, 0), (2, -1, 1, 0), (-2, 1, -1, 0), (-2, -1, -1, 0), (1, 2, 0, 1), (-1, 2, 0, 1), (1, -2, 0, -1), (-1, -2, 0, -1))
+        for row_delta, column_delta, leg_row, leg_column in candidates:
+            if _game_piece(position, row + leg_row, column + leg_column) is None:
+                add_target(row + row_delta, column + column_delta)
+        return moves
+    if kind in {"R", "C"}:
+        for row_delta, column_delta in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            target_row, target_column, jumped = row + row_delta, column + column_delta, False
+            while _game_inside(target_row, target_column):
+                target = _game_piece(position, target_row, target_column)
+                if kind == "R":
+                    if target is None:
+                        moves.append(Move(start, target_row * BOARD_COLS + target_column))
+                    else:
+                        if not _game_own(target, side):
+                            moves.append(Move(start, target_row * BOARD_COLS + target_column))
+                        break
+                elif not jumped:
+                    if target is None:
+                        moves.append(Move(start, target_row * BOARD_COLS + target_column))
+                    else:
+                        jumped = True
+                elif target is not None:
+                    if not _game_own(target, side):
+                        moves.append(Move(start, target_row * BOARD_COLS + target_column))
+                    break
+                target_row += row_delta
+                target_column += column_delta
+        return moves
+    if kind == "P":
+        forward = 1 if side == "w" else -1
+        add_target(row + forward, column)
+        if (row >= 5 if side == "w" else row <= 4):
+            add_target(row, column - 1)
+            add_target(row, column + 1)
+        return moves
+    raise ValueError(f"unknown piece: {piece}")
+
+
+def _game_apply(position: GamePosition, move: Move) -> GamePosition:
+    start_row, start_column = divmod(move.start, BOARD_COLS)
+    end_row, end_column = divmod(move.end, BOARD_COLS)
+    piece = _game_piece(position, start_row, start_column)
+    if piece is None or not _game_own(piece, position.side_to_move):
+        raise ValueError(f"invalid move: {move.start}-{move.end}")
+    board = [list(row) for row in position.board]
+    board[end_row][end_column] = piece
+    board[start_row][start_column] = None
+    return GamePosition(tuple(tuple(row) for row in board), "b" if position.side_to_move == "w" else "w")
+
+
+def _game_in_check(position: GamePosition, side: str) -> bool:
+    king = "K" if side == "w" else "k"
+    king_square = next((row * BOARD_COLS + column for row in range(BOARD_ROWS) for column in range(BOARD_COLS) if position.board[row][column] == king), None)
+    if king_square is None:
+        return True
+    king_row, king_column = divmod(king_square, BOARD_COLS)
+    enemy = "b" if side == "w" else "w"
+    for row_delta, column_delta in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        row, column = king_row + row_delta, king_column + column_delta
+        while _game_inside(row, column):
+            piece = _game_piece(position, row, column)
+            if piece is not None:
+                if _game_own(piece, enemy) and piece.upper() == "R":
+                    return True
+                break
+            row += row_delta
+            column += column_delta
+        row, column, jumped = king_row + row_delta, king_column + column_delta, False
+        while _game_inside(row, column):
+            piece = _game_piece(position, row, column)
+            if piece is not None:
+                if not jumped:
+                    jumped = True
+                else:
+                    if _game_own(piece, enemy) and piece.upper() == "C":
+                        return True
+                    break
+            row += row_delta
+            column += column_delta
+    enemy_king = "k" if side == "w" else "K"
+    step = 1 if enemy == "w" else -1
+    row = king_row + step
+    while _game_inside(row, king_column):
+        piece = _game_piece(position, row, king_column)
+        if piece is not None:
+            if piece == enemy_king:
+                return True
+            break
+        row += step
+    for row_delta, column_delta in ((1, 2), (1, -2), (-1, 2), (-1, -2), (2, 1), (2, -1), (-2, 1), (-2, -1)):
+        row, column = king_row - row_delta, king_column - column_delta
+        piece = _game_piece(position, row, column)
+        if piece is None or not _game_own(piece, enemy) or piece.upper() != "N":
+            continue
+        leg_row = row + (row_delta // 2 if abs(row_delta) == 2 else 0)
+        leg_column = column + (column_delta // 2 if abs(column_delta) == 2 else 0)
+        if _game_piece(position, leg_row, leg_column) is None:
+            return True
+    forward = 1 if enemy == "w" else -1
+    row = king_row - forward
+    piece = _game_piece(position, row, king_column)
+    if piece is not None and _game_own(piece, enemy) and piece.upper() == "P":
+        return True
+    if (king_row >= 5 if enemy == "w" else king_row <= 4):
+        for column in (king_column - 1, king_column + 1):
+            piece = _game_piece(position, king_row, column)
+            if piece is not None and _game_own(piece, enemy) and piece.upper() == "P":
+                return True
+    return False
+
+
+def legal_moves(position: GamePosition) -> list[Move]:
+    candidates = [move for row in range(BOARD_ROWS) for column in range(BOARD_COLS)
+                  if (piece := _game_piece(position, row, column)) is not None and _game_own(piece, position.side_to_move)
+                  for move in _game_piece_moves(position, row, column, piece)]
+    legal: list[Move] = []
+    for move in candidates:
+        target = _game_piece(position, *divmod(move.end, BOARD_COLS))
+        if target is not None and target.upper() == "K":
+            continue
+        next_position = _game_apply(position, move)
+        if not _game_in_check(next_position, position.side_to_move):
+            legal.append(move)
+    return legal
+
+
+def complete_move_topk(start_logits, end_logits, starts, ends):
+    """Compute exact complete-move top-k metrics from separate start/end logits."""
+    pair_scores = start_logits[:, :, None] + end_logits[:, None, :]
+    target_scores = start_logits.gather(1, starts[:, None]).squeeze(1) + end_logits.gather(1, ends[:, None]).squeeze(1)
+    flat_scores = pair_scores.flatten(1)
+    ranks = (flat_scores > target_scores[:, None]).sum(1)
+    return {
+        "complete_top1": (ranks < 1).sum().item(),
+        "complete_top5": (ranks < 5).sum().item(),
+        "complete_top10": (ranks < 10).sum().item(),
+        "complete_masked": False,
+    }
+
+
 def split_for(game_id: str) -> str:
     bucket = int(hashlib.sha256(game_id.encode()).hexdigest()[:8], 16) % 100
     return "train" if bucket < 80 else "validation" if bucket < 90 else "test"

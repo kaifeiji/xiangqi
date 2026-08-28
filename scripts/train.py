@@ -15,8 +15,8 @@ from torch import nn
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
-from backend.models import ResNet
-from backend.inference import complete_move_topk
+from training_models import ResNet
+from data_utils import complete_move_topk
 
 
 @dataclass(frozen=True)

@@ -17,6 +17,33 @@ python -m pip install uv
 python -m uv sync
 ```
 
+### Rust 棋规引擎
+
+Rust native 引擎使用 MSYS2 MINGW64 GCC，不依赖 Visual Studio。首次安装工具链：
+
+```powershell
+C:\msys64\usr\bin\bash.exe -lc "pacman --noconfirm -S --needed mingw-w64-x86_64-toolchain"
+rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+```
+
+编译 Rust 后端：
+
+```powershell
+cargo build --release --bin xiangqi-server
+```
+
+仓库中的 `.cargo/config.toml` 已固定 GNU target 和 MINGW64 linker。验证：
+
+```powershell
+cargo test
+```
+
+当前 GNU Windows target 不支持 ort-sys 自动下载 runtime。首次运行请将 DLL 准备到项目根目录：
+
+```powershell
+.\target\release\xiangqi-server.exe
+```
+
 前端使用 Node.js/npm，开发模式启动前需要先安装依赖：
 
 ```powershell
@@ -25,37 +52,50 @@ npm ci
 
 训练或本地推理使用 CUDA 时，需要兼容的 NVIDIA 驱动和 PyTorch CUDA 环境；CPU 模式不需要 CUDA。Pikafish 仅在引擎对手或标注流程中需要，不是 PyTorch 依赖。
 
-本地 Pikafish 路径模板见 [`.env.example`](.env.example)。标注脚本读取 `.env.local`；Web 服务不读取该文件，启动引擎对手时需显式设置进程环境变量：
+本地 Pikafish 路径模板见 [`.env.example`](.env.example)。Rust Web 服务启动时会读取项目根目录的 `.env.local`；也可以显式设置进程环境变量：
 
 ```powershell
 $env:PIKAFISH_PATH = "C:\path\to\pikafish.exe"
 $env:PIKAFISH_NNUE_PATH = "C:\path\to\pikafish.nnue"
-uv run xiangqi-play --host 127.0.0.1 --port 8000
+cargo build --release --bin xiangqi-server
+.\target\release\xiangqi-server.exe
 ```
+
+MCTS 默认批大小为 32，可在 `.env.local` 中通过 `MCTS_BATCH_SIZE` 调整；批大小越大，通常推理调用次数越少，但单批显存和延迟会增加：
+
+```text
+MCTS_BATCH_SIZE=32
+```
+
+MCTS 默认使用策略温度 `MCTS_POLICY_TEMPERATURE=1.25`，用于避免先验概率过度集中；设为 `1.0` 可恢复原始策略分布。
 
 ## Web 服务
 
-项目提供 Web 对弈服务，生产模式和开发模式使用同一个 Python 入口。
+项目提供 Rust Web 对弈服务。
 
-生产模式：
-
-```powershell
-uv run xiangqi-play --host 127.0.0.1 --port 8000
-```
-
-开发模式：
+启动服务：
 
 ```powershell
-uv run xiangqi-play --dev
+cargo build --release --bin xiangqi-server
+.\target\release\xiangqi-server.exe
 ```
 
-生产模式会安装并构建前端后由 Flask 提供静态文件；开发模式启动 Vite，并将 API 代理到 `http://127.0.0.1:8000`。开发模式访问 `http://127.0.0.1:5173`。
+另开一个终端启动 Vite 开发服务器；它会将 API 代理到 `http://127.0.0.1:8000`，访问 `http://127.0.0.1:5173`：
+
+```powershell
+npm ci
+npm run dev
+```
+
+后端端口可通过 `XIANGQI_PORT` 修改；修改后需要同步调整 Vite 代理配置。
 
 Web 界面提供人机对弈、模型对弈和 JSON 存档回放。模型对弈支持自动/单步推进、模型选择和可选的 MCTS 时间预算；落子默认使用确定性策略（不启用温度采样）；人机模式支持悔棋和局面导航。
 
-开局 book（内置主流开局）默认启用：
+开局 book（内置主流开局）默认启用。模型对弈和人机对弈中的模型方会使用开局库；人机对弈不会替人类预先走第一着：
 
-- 当 `POST /api/games` 请求未提供 `fen` 时，服务会从内置主流开局首着池随机选择一个开局局面作为起点。
+- 人类执黑时，模型执红，会从内置主流开局首着池随机选择一个局面作为起点。
+- 人类执红时，从完整初始局面开始，等待人类走第一着。
+- `model-model` 未提供 `fen` 时，仍从内置主流开局首着池随机选择一个局面作为起点。
 - 当请求提供 `fen` 时，始终以该 `fen` 为准。
 
 ## 数据与训练
@@ -64,19 +104,13 @@ Web 界面提供人机对弈、模型对弈和 JSON 存档回放。模型对弈�
 
 ## 开发入口
 
-前端源码位于 `src/frontend/`，使用 React、TypeScript 和 Vite；后端源码位于 `src/backend/`，包含 Flask API、棋规引擎、模型推理和 player 实现。
+前端源码位于 `src/frontend/`，使用 React、TypeScript 和 Vite；后端源码位于 `src/backend/`，由 Rust API、棋规引擎和 ONNX MCTS 组成。
 
 单独检查前端构建：
 
 ```powershell
 npm ci
 npm run build
-```
-
-也可以绕过 Web 构建直接运行 Flask 入口：
-
-```powershell
-uv run python -m backend.app --host 127.0.0.1 --port 8000
 ```
 
 ## 模型加载

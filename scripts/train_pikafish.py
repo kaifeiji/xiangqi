@@ -17,7 +17,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, Sampler
 
-from backend.models import PikafishResNet
+from training_models import PikafishResNet
 
 CP_SCORE_KIND = 0
 MATE_SCORE_KIND = 1
@@ -423,12 +423,15 @@ def main() -> int:
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     log_file = (args.checkpoint_dir / "training.jsonl").open("a", encoding="utf-8")
+    metrics_file = (args.checkpoint_dir / "metrics.jsonl").open("a", encoding="utf-8")
+    progress_log_file = (args.checkpoint_dir / "progress.jsonl").open("a", encoding="utf-8")
 
-    def emit_log(payload: dict[str, object]) -> None:
+    def emit_log(payload: dict[str, object], *, target: Any = None) -> None:
         message = json.dumps(payload, ensure_ascii=False)
         print(message, flush=True)
-        log_file.write(f"{message}\n")
-        log_file.flush()
+        output = log_file if target is None else target
+        output.write(f"{message}\n")
+        output.flush()
 
     def make_checkpoint(
         *,
@@ -578,7 +581,7 @@ def main() -> int:
                             "value_saturation_ratio": float((value_outputs.abs() >= 0.99).float().mean()),
                             "gradient_norm_pre_clip": last_gradient_norm,
                             "gradient_clipped": gradient_was_clipped,
-                        })
+                        }, target=progress_log_file)
                 if args.max_steps is not None and global_step >= args.max_steps:
                     interrupted_mid_epoch = batch_index + 1 < len(train_loader)
                     break
@@ -618,7 +621,7 @@ def main() -> int:
                 "learning_rate": optimizer.param_groups[0]["lr"], "epoch_seconds": time.perf_counter() - started,
                 "value_learning_rate": optimizer.param_groups[1]["lr"],
                 "gradient_norm_pre_clip": last_gradient_norm,
-            })
+            }, target=metrics_file)
             if args.max_steps is not None and global_step >= args.max_steps:
                 break
             if no_improve_epochs >= EARLY_STOPPING_PATIENCE:
@@ -634,6 +637,8 @@ def main() -> int:
             start_epoch_update_step = 0
     finally:
         log_file.close()
+        metrics_file.close()
+        progress_log_file.close()
     return 0
 
 

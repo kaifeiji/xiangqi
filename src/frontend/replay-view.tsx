@@ -1,5 +1,5 @@
 import { useEffectEvent, useState } from 'react'
-import { changedMove } from './game-utils'
+import { changedMove, fenToBoard } from './game-utils'
 import { MoveRecord } from './move-record'
 import { XiangqiBoard } from './xiangqi-board'
 import type { Game, GameArchive } from './types'
@@ -16,11 +16,47 @@ export function ReplayView({ active }: ReplayViewProps): React.JSX.Element {
   const loadArchive = useEffectEvent(async (file: File) => {
     try {
       const archive = JSON.parse(await file.text()) as GameArchive
-      if (archive.version !== 1 || !Array.isArray(archive.snapshots) || archive.snapshots.length === 0) {
+      if (
+        typeof archive.initial_fen !== 'string'
+        || !Array.isArray(archive.snapshots)
+        || archive.snapshots.length === 0
+        || archive.snapshots.some((snapshot) => typeof snapshot?.fen !== 'string')
+      ) {
         throw new Error('存档格式无效')
       }
+      const normalized = archive.snapshots.map((snapshot, index): Game => ({
+        game_id: `archive-${index}`,
+        mode: archive.mode,
+        human_side: archive.humanSide,
+        side_to_move: snapshot.side_to_move,
+        turn: snapshot.turn,
+        rule60: snapshot.rule60,
+        result: snapshot.result,
+        in_check: false,
+        legal_moves: [],
+        is_human_turn: false,
+        board: fenToBoard(snapshot.fen),
+        last_error: null,
+        mcts_debug: snapshot.mcts_debug ?? null,
+      }))
+      if (
+        archive.initial_fen
+        && normalized[0]
+        && archive.initial_fen.split(' ')[0] !== archive.snapshots[0].fen.split(' ')[0]
+      ) {
+        normalized.unshift({
+          ...normalized[0],
+          game_id: 'archive-initial',
+          turn: 1,
+          side_to_move: archive.initial_fen.split(' ')[1] as Game['side_to_move'],
+          rule60: 0,
+          result: null,
+          board: fenToBoard(archive.initial_fen),
+          mcts_debug: null,
+        })
+      }
       setError('')
-      setSnapshots(archive.snapshots)
+      setSnapshots(normalized)
       setPosition(0)
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : '无法读取存档')
@@ -45,7 +81,11 @@ export function ReplayView({ active }: ReplayViewProps): React.JSX.Element {
             加载存档
             <input type="file" accept="application/json,.json" onChange={(event) => {
               const file = event.target.files?.[0]
-              if (file) void loadArchive(file)
+              if (file) {
+                setPosition(0)
+                setSnapshots([])
+                void loadArchive(file)
+              }
               event.target.value = ''
             }} />
           </label>
@@ -56,6 +96,7 @@ export function ReplayView({ active }: ReplayViewProps): React.JSX.Element {
           error={error}
           currentIndex={position}
           onNavigate={navigateReplay}
+          keyboardNavigationEnabled={active}
         />
       </div>
     </section>

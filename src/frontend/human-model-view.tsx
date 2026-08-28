@@ -21,7 +21,7 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
   const [modelThinking, setModelThinking] = useState(false)
   const [startingGame, setStartingGame] = useState(false)
   const [pendingHumanMove, setPendingHumanMove] = useState(false)
-  const [mctsTimeSeconds, setMctsTimeSeconds] = useState(0)
+  const [mctsSimulations, setMctsSimulations] = useState(0)
   const [snapshots, setSnapshots] = useState<Game[]>([])
   const [position, setPosition] = useState(0)
   const announcedResult = useRef<string | undefined>(undefined)
@@ -78,7 +78,7 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
       setSnapshots([])
       setPosition(0)
       announcedResult.current = undefined
-      const payload = { mode: 'human-model', human_side: humanSide, model, mcts_time_seconds: mctsTimeSeconds }
+      const payload = { mode: 'human-model', human_side: humanSide, model, mcts_simulations: mctsSimulations }
       const nextGame = await request<Game>('/api/games', { method: 'POST', body: JSON.stringify(payload) })
       setGame(nextGame)
       setSnapshots([nextGame])
@@ -247,16 +247,15 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
               {models.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
             </select>
           </label>
-          <label>
-            MCTS时间
-            <select value={String(mctsTimeSeconds)} onChange={(event) => setMctsTimeSeconds(Number(event.target.value))} disabled={startingGame || Boolean(game)}>
-              <option value="0">不加 MCTS</option>
-              <option value="1">1 秒</option>
-              <option value="3">3 秒</option>
-              <option value="5">5 秒</option>
-              <option value="10">10 秒</option>
-            </select>
-          </label>
+          {model !== 'pikafish' && <label>
+              MCTS模拟
+              <select value={String(mctsSimulations)} onChange={(event) => setMctsSimulations(Number(event.target.value))} disabled={startingGame || Boolean(game)}>
+                <option value="0">0次</option>
+                <option value="1000">1000次</option>
+                <option value="5000">5000次</option>
+                <option value="10000">10000次</option>
+              </select>
+            </label>}
           {!game && <button type="button" onClick={() => void startGame()} disabled={startingGame || !modelsLoaded || !models.length}>
             {startingGame ? '创建中...' : '开始新对局'}
           </button>}
@@ -273,6 +272,7 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
           archiveHumanSide={game?.human_side ?? humanSide}
           currentIndex={position}
           onNavigate={navigateReplay}
+          keyboardNavigationEnabled={active}
         />
       </div>
     </section>
