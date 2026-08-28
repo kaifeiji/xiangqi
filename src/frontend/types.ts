@@ -24,6 +24,8 @@ export interface Game {
 }
 
 export interface MctsDebug {
+  searched_fen?: string
+  searched_side?: Side
   simulations: number
   average_leaf_depth: number
   max_leaf_depth: number

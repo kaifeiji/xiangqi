@@ -55,6 +55,14 @@ fn board_tensor(position: &Position, output: &mut [f32]) {
     }
 }
 
+fn current_view_action(position: &Position, start: usize, end: usize) -> (usize, usize) {
+    if position.red_to_move {
+        (start, end)
+    } else {
+        (89 - start, 89 - end)
+    }
+}
+
 pub struct OnnxEvaluator {
     session: Session,
 }
@@ -105,7 +113,11 @@ impl OnnxEvaluator {
             let offset = index * 8100;
             let scores: Vec<f32> = moves
                 .iter()
-                .map(|&(start, end)| logits[offset + start * 90 + end])
+                .map(|&(start, end)| {
+                    let (policy_start, policy_end) =
+                        current_view_action(&positions[index], start, end);
+                    logits[offset + policy_start * 90 + policy_end]
+                })
                 .collect();
             let max_score = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             let mut priors: Vec<f32> = scores
@@ -423,6 +435,21 @@ pub(crate) fn search_onnx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_action_uses_current_view_coordinates() {
+        let red = Position::parse(
+            "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1",
+        )
+        .unwrap();
+        let black = Position::parse(
+            "rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR b - - 0 1",
+        )
+        .unwrap();
+
+        assert_eq!(current_view_action(&red, 0, 9), (0, 9));
+        assert_eq!(current_view_action(&black, 0, 9), (89, 80));
+    }
 
     #[test]
     fn backup_flips_value_for_each_parent_ply() {

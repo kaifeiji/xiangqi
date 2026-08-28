@@ -63,6 +63,26 @@ export function fenToBoard(fen: string): BoardCell[][] {
   })
 }
 
+export function gameWithPreviewMove(game: Game, move: string): Game | undefined {
+  const searchedFen = game.mcts_debug?.searched_fen
+  const [origin, destination] = move.split('-')
+  if (!searchedFen || !origin || !destination) return undefined
+  const board = fenToBoard(searchedFen)
+  const originCell = board.flat().find((cell) => cell.square === origin)
+  if (!originCell?.piece) return undefined
+  return {
+    ...game,
+    board: board.map((row) => row.map((cell) => cell.square === origin
+      ? { ...cell, piece: null }
+      : cell.square === destination
+        ? { ...cell, piece: originCell.piece }
+        : cell)),
+    side_to_move: game.mcts_debug?.searched_side ?? game.side_to_move,
+    in_check: false,
+    legal_moves: [],
+  }
+}
+
 export function piecesToBoard(pieces: Array<string | null>): BoardCell[][] {
   if (pieces.length !== 90) throw new Error('棋盘数据无效')
   return Array.from({ length: 10 }, (_, displayRow) => {

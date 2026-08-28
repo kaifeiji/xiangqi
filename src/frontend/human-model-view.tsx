@@ -1,7 +1,7 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import type { Key } from 'xiangqiground/types'
 import { request } from './api'
-import { changedMove, resultText, statusFor, toIccs } from './game-utils'
+import { changedMove, gameWithPreviewMove, resultText, statusFor, toIccs, toKey } from './game-utils'
 import { MoveRecord } from './move-record'
 import { XiangqiBoard } from './xiangqi-board'
 import type { Game, ModelOption, Side } from './types'
@@ -24,6 +24,7 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
   const [mctsSimulations, setMctsSimulations] = useState(0)
   const [snapshots, setSnapshots] = useState<Game[]>([])
   const [position, setPosition] = useState(0)
+  const [previewMove, setPreviewMove] = useState<string | null>(null)
   const announcedResult = useRef<string | undefined>(undefined)
 
   const buildOptimisticGame = useEffectEvent((previousGame: Game, origin: Key, destination: Key): Game => {
@@ -56,6 +57,7 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
   }, [model, models])
 
   const updateGame = useEffectEvent((nextGame: Game) => {
+    setPreviewMove(null)
     setGame((previousGame) => {
       if (!previousGame || previousGame.game_id !== nextGame.game_id) return previousGame
       setLastMove(changedMove(previousGame.board, nextGame.board, nextGame.side_to_move))
@@ -77,6 +79,7 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
       setLastMove(undefined)
       setSnapshots([])
       setPosition(0)
+      setPreviewMove(null)
       announcedResult.current = undefined
       const payload = { mode: 'human-model', human_side: humanSide, model, mcts_simulations: mctsSimulations }
       const nextGame = await request<Game>('/api/games', { method: 'POST', body: JSON.stringify(payload) })
@@ -91,6 +94,7 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
 
   const playHumanMove = useEffectEvent(async (origin: Key, destination: Key) => {
     if (!game || pendingHumanMove) return
+    setPreviewMove(null)
     const previousGame = game
     const optimisticGame = buildOptimisticGame(previousGame, origin, destination)
     const hasOptimisticDelta = optimisticGame.turn !== previousGame.turn
@@ -181,6 +185,7 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
 
   const undoMove = useEffectEvent(async () => {
     if (!game || pendingHumanMove || modelThinking || snapshots.length < 2) return
+    setPreviewMove(null)
     const undoPlies = game.is_human_turn ? 2 : 1
     try {
       setError('')
@@ -213,6 +218,7 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
     setGame(undefined)
     setSnapshots([])
     setPosition(0)
+    setPreviewMove(null)
     setLastMove(undefined)
     announcedResult.current = undefined
     setError('')
@@ -220,18 +226,26 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
 
   const navigateReplay = useEffectEvent((index: number) => {
     if (index < 0 || index >= snapshots.length) return
+    setPreviewMove(null)
     setPosition(index)
   })
 
   const displayedGame = snapshots[position] ?? game
+  const previewGame = displayedGame && previewMove ? gameWithPreviewMove(displayedGame, previewMove) : undefined
+  const boardGame = previewGame ?? displayedGame
   const displayedPreviousGame = position > 0 ? snapshots[position - 1] : undefined
-  const displayedLastMove = displayedGame && displayedPreviousGame
+  const displayedLastMove = previewMove
+    ? (() => {
+        const [origin, destination] = previewMove.split('-')
+        return origin && destination ? [toKey(origin), toKey(destination)] : undefined
+      })()
+    : displayedGame && displayedPreviousGame
     ? changedMove(displayedPreviousGame.board, displayedGame.board, displayedGame.side_to_move)
     : lastMove
 
   return (
     <section className="mode-view" hidden={!active} aria-label="人机对弈">
-      <XiangqiBoard active={active} game={displayedGame} orientation={humanSide === 'b' ? 'black' : 'white'} lastMove={displayedLastMove} readOnly={position + 1 !== snapshots.length} onMove={playHumanMove} />
+      <XiangqiBoard active={active} game={boardGame} orientation={humanSide === 'b' ? 'black' : 'white'} lastMove={displayedLastMove} readOnly={previewMove !== null || position + 1 !== snapshots.length} onMove={playHumanMove} />
       <div className="side-panels">
         <aside className="controls" aria-label="人机设置">
           <label>
@@ -272,6 +286,8 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
           archiveHumanSide={game?.human_side ?? humanSide}
           currentIndex={position}
           onNavigate={navigateReplay}
+          onPreviewMove={(move) => setPreviewMove((current) => current === move ? null : move)}
+          previewMove={previewMove}
           keyboardNavigationEnabled={active}
         />
       </div>

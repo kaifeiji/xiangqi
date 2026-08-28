@@ -1,7 +1,7 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import type { Key } from 'xiangqiground/types'
 import { request } from './api'
-import { changedMove, resultText, statusFor } from './game-utils'
+import { changedMove, gameWithPreviewMove, resultText, statusFor, toKey } from './game-utils'
 import { MoveRecord } from './move-record'
 import { XiangqiBoard } from './xiangqi-board'
 import type { Game, ModelOption } from './types'
@@ -23,6 +23,8 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
   const [startingGame, setStartingGame] = useState(false)
   const [thinking, setThinking] = useState(false)
   const [autoPlay, setAutoPlay] = useState(true)
+  const [singleStepMode, setSingleStepMode] = useState(false)
+  const [previewMove, setPreviewMove] = useState<string | null>(null)
   const [mctsSimulations, setMctsSimulations] = useState(0)
   const announcedResult = useRef<string | undefined>(undefined)
 
@@ -33,6 +35,7 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
   }, [blackModel, models, redModel])
 
   const updateGame = useEffectEvent((nextGame: Game) => {
+    setPreviewMove(null)
     setGame((previousGame) => {
       if (!previousGame || previousGame.game_id !== nextGame.game_id) return previousGame
       setLastMove(changedMove(previousGame.board, nextGame.board, nextGame.side_to_move))
@@ -45,13 +48,15 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
     })
   })
 
-  const startGame = useEffectEvent(async () => {
+  const startGame = useEffectEvent(async (singleStep: boolean) => {
     if (startingGame) return
     try {
       setStartingGame(true)
       setError('')
       setThinking(false)
-      setAutoPlay(true)
+      setAutoPlay(!singleStep)
+      setSingleStepMode(singleStep)
+      setPreviewMove(null)
       setGame(undefined)
       setLastMove(undefined)
       setSnapshots([])
@@ -79,6 +84,8 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
     } catch {
     }
     setAutoPlay(false)
+    setSingleStepMode(false)
+    setPreviewMove(null)
     setGame(undefined)
     setSnapshots([])
     setPosition(0)
@@ -102,6 +109,12 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
     }
   })
 
+  const continueModel = useEffectEvent(() => {
+    if (!game || game.result || thinking) return
+    setPosition(Math.max(snapshots.length - 1, 0))
+    setAutoPlay(true)
+  })
+
   useEffect(() => {
     if (!game || !autoPlay || game.result || thinking || position + 1 !== snapshots.length) return
     void stepModel()
@@ -118,18 +131,27 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
 
   const navigateReplay = useEffectEvent((index: number) => {
     if (index < 0 || index >= snapshots.length) return
+    setPreviewMove(null)
+    setAutoPlay(false)
     setPosition(index)
   })
 
   const displayedGame = snapshots[position] ?? game
+  const previewGame = displayedGame && previewMove ? gameWithPreviewMove(displayedGame, previewMove) : undefined
+  const boardGame = previewGame ?? displayedGame
   const displayedPreviousGame = position > 0 ? snapshots[position - 1] : undefined
-  const displayedLastMove = displayedGame && displayedPreviousGame
+  const displayedLastMove = previewMove
+    ? (() => {
+        const [origin, destination] = previewMove.split('-')
+        return origin && destination ? [toKey(origin), toKey(destination)] : undefined
+      })()
+    : displayedGame && displayedPreviousGame
     ? changedMove(displayedPreviousGame.board, displayedGame.board, displayedGame.side_to_move)
     : lastMove
 
   return (
     <section className="mode-view" hidden={!active} aria-label="模型对弈">
-      <XiangqiBoard active={active} game={displayedGame} lastMove={displayedLastMove} readOnly onMove={() => undefined} />
+      <XiangqiBoard active={active} game={boardGame} lastMove={displayedLastMove} readOnly onMove={() => undefined} />
       <div className="side-panels">
         <aside className="controls" aria-label="模型对弈设置">
           <label>
@@ -153,11 +175,27 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
                 <option value="10000">10000次</option>
               </select>
             </label>}
-          {!game && <button type="button" onClick={() => void startGame()} disabled={startingGame || !modelsLoaded || !models.length}>
-            {startingGame ? '创建中...' : '开始新对局'}
-          </button>}
+          {!game && <>
+            <button type="button" onClick={() => void startGame(false)} disabled={startingGame || !modelsLoaded || !models.length}>
+              {startingGame ? '创建中...' : '开始'}
+            </button>
+            <button type="button" onClick={() => void startGame(true)} disabled={startingGame || !modelsLoaded || !models.length}>
+              {startingGame ? '创建中...' : '开始（单步）'}
+            </button>
+          </>}
           {game && <button type="button" onClick={endGame} disabled={startingGame || thinking}>结束对局</button>}
-          {game && !game.result && <button id="step-button" type="button" onClick={() => setAutoPlay((enabled) => !enabled)}>{autoPlay ? '暂停' : '继续'}</button>}
+          {game && !game.result && (singleStepMode ? (
+            <button id="step-button" type="button" onClick={() => {
+              if (position + 1 !== snapshots.length) setPosition(snapshots.length - 1)
+              void stepModel()
+            }} disabled={thinking || previewMove !== null}>
+              下一步
+            </button>
+          ) : (
+            <button id="step-button" type="button" onClick={() => autoPlay ? setAutoPlay(false) : continueModel()} disabled={thinking || previewMove !== null}>
+              {autoPlay ? '暂停' : '继续'}
+            </button>
+          ))}
         </aside>
         <MoveRecord
           snapshots={snapshots}
@@ -167,6 +205,11 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
           archiveHumanSide={null}
           currentIndex={position}
           onNavigate={navigateReplay}
+          onPreviewMove={(move) => {
+            setAutoPlay(false)
+            setPreviewMove((current) => current === move ? null : move)
+          }}
+          previewMove={previewMove}
           keyboardNavigationEnabled={active}
         />
       </div>

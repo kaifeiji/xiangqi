@@ -1,5 +1,5 @@
 import { useEffectEvent, useState } from 'react'
-import { changedMove, fenToBoard } from './game-utils'
+import { changedMove, gameWithPreviewMove, fenToBoard, toKey } from './game-utils'
 import { MoveRecord } from './move-record'
 import { XiangqiBoard } from './xiangqi-board'
 import type { Game, GameArchive } from './types'
@@ -11,6 +11,7 @@ interface ReplayViewProps {
 export function ReplayView({ active }: ReplayViewProps): React.JSX.Element {
   const [snapshots, setSnapshots] = useState<Game[]>([])
   const [position, setPosition] = useState(0)
+  const [previewMove, setPreviewMove] = useState<string | null>(null)
   const [error, setError] = useState('')
 
   const loadArchive = useEffectEvent(async (file: File) => {
@@ -58,6 +59,7 @@ export function ReplayView({ active }: ReplayViewProps): React.JSX.Element {
       setError('')
       setSnapshots(normalized)
       setPosition(0)
+      setPreviewMove(null)
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : '无法读取存档')
     }
@@ -65,16 +67,24 @@ export function ReplayView({ active }: ReplayViewProps): React.JSX.Element {
 
   const navigateReplay = useEffectEvent((index: number) => {
     if (index < 0 || index >= snapshots.length) return
+    setPreviewMove(null)
     setPosition(index)
   })
 
   const game = snapshots[position]
+  const previewGame = game && previewMove ? gameWithPreviewMove(game, previewMove) : undefined
+  const boardGame = previewGame ?? game
   const previousGame = position > 0 ? snapshots[position - 1] : undefined
-  const lastMove = game && previousGame ? changedMove(previousGame.board, game.board, game.side_to_move) : undefined
+  const lastMove = previewMove
+    ? (() => {
+        const [origin, destination] = previewMove.split('-')
+        return origin && destination ? [toKey(origin), toKey(destination)] : undefined
+      })()
+    : game && previousGame ? changedMove(previousGame.board, game.board, game.side_to_move) : undefined
 
   return (
     <section className="mode-view" hidden={!active} aria-label="回放">
-      <XiangqiBoard active={active} game={game} lastMove={lastMove} readOnly onMove={() => undefined} />
+      <XiangqiBoard active={active} game={boardGame} lastMove={lastMove} readOnly onMove={() => undefined} />
       <div className="side-panels">
         <aside className="controls" aria-label="回放设置">
           <label>
@@ -96,6 +106,8 @@ export function ReplayView({ active }: ReplayViewProps): React.JSX.Element {
           error={error}
           currentIndex={position}
           onNavigate={navigateReplay}
+          onPreviewMove={(move) => setPreviewMove((current) => current === move ? null : move)}
+          previewMove={previewMove}
           keyboardNavigationEnabled={active}
         />
       </div>
