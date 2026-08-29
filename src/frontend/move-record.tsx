@@ -37,10 +37,11 @@ export function MoveRecord({ snapshots, status, error, archiveMode, archiveHuman
   const canSaveArchive = Boolean(archiveMode) && snapshots.length > 0
   const currentSnapshot = snapshots[currentPly]
   const mctsDebug = currentSnapshot?.mcts_debug ?? null
+  const policyDebug = currentSnapshot?.policy_debug ?? null
   const fallbackAnalysisSide = snapshots[currentPly - 1]?.side_to_move ?? currentSnapshot?.side_to_move
-  const analysisSideCode = mctsDebug?.searched_side ?? fallbackAnalysisSide
+  const analysisSideCode = mctsDebug?.searched_side ?? policyDebug?.searched_side ?? fallbackAnalysisSide
   const analysisSide = analysisSideCode === 'w' ? '红方' : '黑方'
-  const value = mctsDebug?.root_network_value ?? null
+  const value = mctsDebug?.root_network_value ?? policyDebug?.network_value ?? null
   const advantage = value === null ? '暂无评估' : Math.abs(value) < 0.05 ? '局面均势' : value > 0 ? `${analysisSide}优势` : `${analysisSide === '红方' ? '黑方' : '红方'}优势`
 
   const navigateWithKeyboard = useEffectEvent((event: KeyboardEvent): void => {
@@ -61,7 +62,7 @@ export function MoveRecord({ snapshots, status, error, archiveMode, archiveHuman
     const archive: GameArchive = {
       savedAt: new Date().toISOString(), mode: archiveMode, humanSide: archiveHumanSide ?? null,
       initial_fen: `${boardToFen(snapshots[0].board)} ${snapshots[0].side_to_move} - - 0 1`,
-      snapshots: snapshots.map((snapshot): CompactArchiveSnapshot => ({ fen: boardToFen(snapshot.board), side_to_move: snapshot.side_to_move, turn: snapshot.turn, rule60: snapshot.rule60, result: snapshot.result, mcts_debug: snapshot.mcts_debug ?? null })),
+      snapshots: snapshots.map((snapshot): CompactArchiveSnapshot => ({ fen: boardToFen(snapshot.board), side_to_move: snapshot.side_to_move, turn: snapshot.turn, rule60: snapshot.rule60, result: snapshot.result, mcts_debug: snapshot.mcts_debug ?? null, policy_debug: snapshot.policy_debug ?? null })),
     }
     const blob = new Blob([JSON.stringify(archive, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
@@ -83,7 +84,7 @@ export function MoveRecord({ snapshots, status, error, archiveMode, archiveHuman
       </div>
       <div className="record-pane" role="tabpanel" aria-label="行棋" hidden={activeTab !== 'record'}>
         <header className="record-header">
-          <div><h2>行棋记录</h2><p className="status" role="status">{status}</p></div>
+          <div><p className="status" role="status">{status}</p></div>
         </header>
         {error && <p className="error" role="alert">{error}</p>}
         {replayEnabled && <div className="record-controls">
@@ -103,23 +104,31 @@ export function MoveRecord({ snapshots, status, error, archiveMode, archiveHuman
         </ol>
       </div>
       <div className="analysis-panel" role="tabpanel" aria-label="着法" hidden={activeTab !== 'analysis'}>
-        {!mctsDebug ? <p className="analysis-empty">该局面没有 MCTS 分析数据</p> : <>
+        {!mctsDebug && !policyDebug ? <p className="analysis-empty">该局面没有模型分析数据</p> : <>
           <div className="analysis-summary">
             <div><span className="analysis-label">分析方</span><strong>{analysisSide}</strong></div>
             <div><span className="analysis-label">局面判断</span><strong>{advantage}</strong></div>
             <div><span className="analysis-label">Root value</span><strong className={value !== null && value >= 0 ? 'value-positive' : 'value-negative'}>{value === null ? '--' : value.toFixed(3)}</strong></div>
           </div>
-          <dl className="analysis-stats">
+          {mctsDebug && <dl className="analysis-stats">
             <div><dt>模拟次数</dt><dd>{mctsDebug.simulations}</dd></div>
             <div><dt>平均叶深</dt><dd>{mctsDebug.average_leaf_depth.toFixed(1)}</dd></div>
             <div><dt>最大叶深</dt><dd>{mctsDebug.max_leaf_depth}</dd></div>
-          </dl>
-          <div className="candidate-header"><h3>候选着法</h3><span>按访问次数排序</span></div>
+          </dl>}
+          <div className="candidate-header"><h3>候选着法</h3><span>{mctsDebug ? '按访问次数排序' : '按 Policy 概率排序'}</span></div>
           <div className="candidate-list">
-            {mctsDebug.root_children.slice().sort((left, right) => right.visits - left.visits).map((candidate) => {
+            {mctsDebug && mctsDebug.root_children.slice().sort((left, right) => right.visits - left.visits).map((candidate) => {
               const content = <>
-                <strong>{candidate.move}</strong><span>访问 {candidate.visits}</span><span>Q {(-candidate.q).toFixed(3)}</span><span>原始 Q {candidate.q.toFixed(3)}</span><span>Prior {candidate.prior.toFixed(3)}</span>
+                <strong>{candidate.move}</strong><span>访问 {candidate.visits}</span><span>Q {candidate.q.toFixed(3)}</span><span>Policy {(candidate.prior * 100).toFixed(2)}%</span>
               </>
+              return onPreviewMove ? (
+                <button type="button" className={`candidate-row${previewMove === candidate.move ? ' selected' : ''}`} key={candidate.move} aria-pressed={previewMove === candidate.move} onClick={() => onPreviewMove(candidate.move)}>
+                  {content}
+                </button>
+              ) : <div className="candidate-row" key={candidate.move}>{content}</div>
+            })}
+            {policyDebug && policyDebug.candidates.slice().sort((left, right) => right.probability - left.probability).map((candidate) => {
+              const content = <><strong>{candidate.move}</strong><span>Policy {(candidate.probability * 100).toFixed(2)}%</span></>
               return onPreviewMove ? (
                 <button type="button" className={`candidate-row${previewMove === candidate.move ? ' selected' : ''}`} key={candidate.move} aria-pressed={previewMove === candidate.move} onClick={() => onPreviewMove(candidate.move)}>
                   {content}

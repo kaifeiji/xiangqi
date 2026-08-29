@@ -10,6 +10,7 @@ pub enum Player {
 pub struct PlayerMove {
     pub movement: (u8, u8),
     pub mcts_debug: Option<xiangqi::mcts::MctsSearchResult>,
+    pub policy_debug: Option<xiangqi::mcts::PolicySearchResult>,
 }
 
 pub struct PikafishPlayer {
@@ -40,20 +41,26 @@ impl Player {
 
     pub fn choose_move(&mut self, game: &Game, simulations: usize) -> Result<PlayerMove, String> {
         match self {
-            Self::Onnx { model_path } if simulations == 0 => Ok(PlayerMove {
-                movement: game.policy_search(model_path)?,
-                mcts_debug: None,
-            }),
+            Self::Onnx { model_path } if simulations == 0 => {
+                let result = game.policy_search(model_path)?;
+                Ok(PlayerMove {
+                    movement: result.movement,
+                    mcts_debug: None,
+                    policy_debug: Some(result),
+                })
+            }
             Self::Onnx { model_path } => {
                 let result = game.search(model_path, simulations, 8, 256)?;
                 Ok(PlayerMove {
                     movement: result.movement,
                     mcts_debug: Some(result),
+                    policy_debug: None,
                 })
             }
             Self::Pikafish(player) => Ok(PlayerMove {
                 movement: player.choose_move(game)?,
                 mcts_debug: None,
+                policy_debug: None,
             }),
         }
     }

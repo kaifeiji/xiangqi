@@ -389,6 +389,16 @@ button.candidate-row.selected {
   opacity: 0.55;
 }
 
+.game-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.game-actions button {
+  min-width: 0;
+  flex: 1;
+}
+
 .replay-controls {
   display: flex;
   align-items: center;

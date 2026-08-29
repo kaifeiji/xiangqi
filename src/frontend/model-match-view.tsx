@@ -77,7 +77,7 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
   })
 
   const endGame = useEffectEvent(async () => {
-    if (!game || thinking) return
+    if (!game) return
     const gameId = game.game_id
     try {
       await request(`/api/games/${gameId}/close`, { method: 'POST' })
@@ -175,27 +175,29 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
                 <option value="10000">10000次</option>
               </select>
             </label>}
-          {!game && <>
-            <button type="button" onClick={() => void startGame(false)} disabled={startingGame || !modelsLoaded || !models.length}>
-              {startingGame ? '创建中...' : '开始'}
-            </button>
-            <button type="button" onClick={() => void startGame(true)} disabled={startingGame || !modelsLoaded || !models.length}>
-              {startingGame ? '创建中...' : '开始（单步）'}
-            </button>
-          </>}
-          {game && <button type="button" onClick={endGame} disabled={startingGame || thinking}>结束对局</button>}
-          {game && !game.result && (singleStepMode ? (
-            <button id="step-button" type="button" onClick={() => {
-              if (position + 1 !== snapshots.length) setPosition(snapshots.length - 1)
-              void stepModel()
-            }} disabled={thinking || previewMove !== null}>
-              下一步
-            </button>
-          ) : (
-            <button id="step-button" type="button" onClick={() => autoPlay ? setAutoPlay(false) : continueModel()} disabled={thinking || previewMove !== null}>
-              {autoPlay ? '暂停' : '继续'}
-            </button>
-          ))}
+          <div className="game-actions">
+            {!game && <>
+              <button type="button" onClick={() => void startGame(false)} disabled={startingGame || !modelsLoaded || !models.length}>
+                {startingGame ? '创建中...' : '开始'}
+              </button>
+              <button type="button" onClick={() => void startGame(true)} disabled={startingGame || !modelsLoaded || !models.length}>
+                {startingGame ? '创建中...' : '单步'}
+              </button>
+            </>}
+            {game && <button type="button" onClick={endGame} disabled={startingGame}>结束</button>}
+            {game && !game.result && (singleStepMode ? (
+              <button id="step-button" type="button" onClick={() => {
+                if (position + 1 !== snapshots.length) setPosition(snapshots.length - 1)
+                void stepModel()
+              }} disabled={thinking || previewMove !== null}>
+                下一步
+              </button>
+            ) : (
+              <button id="step-button" type="button" onClick={() => autoPlay ? setAutoPlay(false) : continueModel()} disabled={previewMove !== null || (!autoPlay && thinking)}>
+                {autoPlay ? '暂停' : '继续'}
+              </button>
+            ))}
+          </div>
         </aside>
         <MoveRecord
           snapshots={snapshots}

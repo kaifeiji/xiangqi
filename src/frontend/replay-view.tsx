@@ -39,6 +39,7 @@ export function ReplayView({ active }: ReplayViewProps): React.JSX.Element {
         board: fenToBoard(snapshot.fen),
         last_error: null,
         mcts_debug: snapshot.mcts_debug ?? null,
+        policy_debug: snapshot.policy_debug ?? null,
       }))
       if (
         archive.initial_fen
@@ -54,6 +55,7 @@ export function ReplayView({ active }: ReplayViewProps): React.JSX.Element {
           result: null,
           board: fenToBoard(archive.initial_fen),
           mcts_debug: null,
+          policy_debug: null,
         })
       }
       setError('')

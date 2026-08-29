@@ -64,7 +64,7 @@ export function fenToBoard(fen: string): BoardCell[][] {
 }
 
 export function gameWithPreviewMove(game: Game, move: string): Game | undefined {
-  const searchedFen = game.mcts_debug?.searched_fen
+  const searchedFen = game.mcts_debug?.searched_fen ?? game.policy_debug?.searched_fen
   const [origin, destination] = move.split('-')
   if (!searchedFen || !origin || !destination) return undefined
   const board = fenToBoard(searchedFen)
@@ -77,7 +77,7 @@ export function gameWithPreviewMove(game: Game, move: string): Game | undefined 
       : cell.square === destination
         ? { ...cell, piece: originCell.piece }
         : cell)),
-    side_to_move: game.mcts_debug?.searched_side ?? game.side_to_move,
+    side_to_move: game.mcts_debug?.searched_side ?? game.policy_debug?.searched_side ?? game.side_to_move,
     in_check: false,
     legal_moves: [],
   }

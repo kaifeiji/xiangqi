@@ -26,6 +26,7 @@ J_SELECT_BASE_KL = 2.0510
 J_SELECT_BASE_CP_MAE = 62.55
 EARLY_STOPPING_PATIENCE = 5
 EARLY_STOPPING_MIN_DELTA = 0.004
+MATE_VALUE_WEIGHT = 4.0
 
 
 @dataclass(frozen=True)
@@ -229,10 +230,22 @@ def compute_losses(
     policy_loss = (per_sample_policy * weights).sum() / weights.sum().clamp_min(1)
 
     teacher_scores = batch["teacher_scores"].to(value_predictions.dtype)
-    value_valid = (batch["teacher_score_kinds"] == CP_SCORE_KIND) & torch.isfinite(teacher_scores)
-    value_targets = torch.tanh(teacher_scores.clamp(-900, 900) / value_scale)
+    is_cp = batch["teacher_score_kinds"] == CP_SCORE_KIND
+    is_mate = batch["teacher_score_kinds"] == MATE_SCORE_KIND
+    finite_scores = torch.isfinite(teacher_scores)
+    mate_valid = is_mate & finite_scores & (teacher_scores != 0)
+    value_valid = (is_cp & finite_scores) | mate_valid
+    value_targets = torch.where(
+        mate_valid,
+        teacher_scores.sign(),
+        torch.tanh(teacher_scores.clamp(-900, 900) / value_scale),
+    )
     value_errors = torch.nn.functional.smooth_l1_loss(value_predictions.reshape(-1), value_targets, beta=0.1, reduction="none")
-    value_loss = value_errors[value_valid].mean() if value_valid.any() else value_errors.sum() * 0
+    value_weights = torch.where(mate_valid, MATE_VALUE_WEIGHT, 1.0).to(value_predictions.dtype)
+    value_loss = (
+        (value_errors * value_weights * value_valid).sum() / (value_weights * value_valid).sum().clamp_min(1)
+        if value_valid.any() else value_errors.sum() * 0
+    )
     cp_policy_rows = cp_rows
     cp_policy_count = cp_policy_rows.sum()
     return {
@@ -240,6 +253,7 @@ def compute_losses(
         "value_loss": value_loss,
         "policy_valid": policy_valid,
         "value_valid": value_valid,
+        "value_mate": mate_valid,
         "mate_policy": mate_rows,
         "cp_policy_kl": per_sample_cp_kl[cp_policy_rows].mean() if cp_policy_count else per_sample_cp_kl.sum() * 0,
         "cp_policy_count": cp_policy_count,
@@ -258,12 +272,49 @@ def move_batch(batch: dict[str, Tensor], device: torch.device) -> dict[str, Tens
     return {name: value.to(device, non_blocking=True) for name, value in batch.items()}
 
 
+def mirror_action_ids(action_ids: Tensor) -> Tensor:
+    valid = action_ids >= 0
+    squares = action_ids.clamp_min(0)
+    starts, ends = squares.div(90, rounding_mode="floor"), squares.remainder(90)
+    mirrored_starts = (starts // 9) * 9 + (8 - starts.remainder(9))
+    mirrored_ends = (ends // 9) * 9 + (8 - ends.remainder(9))
+    return torch.where(valid, mirrored_starts * 90 + mirrored_ends, action_ids)
+
+
+def with_horizontal_mirror(batch: dict[str, Tensor]) -> dict[str, Tensor]:
+    positions = batch["positions"]
+    legal_action_ids = batch["legal_action_ids"]
+    legal_action_offsets = batch["legal_action_offsets"]
+    mirrored_legal_action_ids = mirror_action_ids(legal_action_ids)
+    legal_count = len(legal_action_ids)
+    return {
+        **{
+            name: torch.cat((value, value), dim=0)
+            for name, value in batch.items()
+            if name not in {"positions", "candidate_action_ids", "legal_action_ids", "legal_action_offsets"}
+        },
+        "positions": torch.cat((positions, torch.flip(positions, dims=[3])), dim=0),
+        "candidate_action_ids": torch.cat((
+            batch["candidate_action_ids"], mirror_action_ids(batch["candidate_action_ids"]),
+        ), dim=0),
+        "legal_action_ids": torch.cat((legal_action_ids, mirrored_legal_action_ids)),
+        "legal_action_offsets": torch.cat((
+            legal_action_offsets,
+            legal_action_offsets[1:] + legal_count,
+        )),
+    }
+
+
 def joint_loss(losses: dict[str, Tensor], policy_weight: float, value_weight: float) -> Tensor:
     return policy_weight * losses["policy_loss"] + value_weight * losses["value_loss"]
 
 
 def compute_j_select(validation: dict[str, float]) -> float:
-    return 0.5 * (validation["cp_policy_kl"] / J_SELECT_BASE_KL) + 0.5 * (validation["value_cp_mae_le_300"] / J_SELECT_BASE_CP_MAE)
+    return (
+        0.4 * (validation["cp_policy_kl"] / J_SELECT_BASE_KL)
+        + 0.4 * (validation["value_cp_mae_le_300"] / J_SELECT_BASE_CP_MAE)
+        + 0.2 * (1 - validation["value_sign_accuracy"])
+    )
 
 
 def evaluate(
@@ -280,8 +331,11 @@ def evaluate(
 ) -> dict[str, float]:
     model.eval()
     totals = {"joint_loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0}
-    policy_valid = value_valid = mate_policy = samples = cp_mae_samples = cp_policy_samples = 0
-    cp_mae_total = 0.0
+    policy_valid = value_valid = mate_policy = value_mate = samples = cp_policy_samples = 0
+    cp_mae_total = cp_mae_all_total = cp_mae_gt_300_total = 0.0
+    cp_mae_samples = cp_mae_all_samples = cp_mae_gt_300_samples = 0
+    sign_correct = sign_samples = sign_gt_300_correct = sign_gt_300_samples = 0
+    value_target_mae_total = value_target_mae_samples = 0.0
     cp_policy_kl_total = 0.0
     with torch.no_grad():
         for batch_index, batch in enumerate(loader):
@@ -300,15 +354,48 @@ def evaluate(
             policy_valid += int(losses["policy_valid"].sum())
             value_valid += int(losses["value_valid"].sum())
             mate_policy += int(losses["mate_policy"].sum())
+            value_mate += int(losses["value_mate"].sum())
             cp_policy_count = int(losses["cp_policy_count"])
             cp_policy_kl_total += float(losses["cp_policy_kl"]) * cp_policy_count
             cp_policy_samples += cp_policy_count
             teacher_scores = batch["teacher_scores"]
-            cp_mae_mask = losses["value_valid"] & (teacher_scores.abs() <= 300)
-            if cp_mae_mask.any():
-                predicted_cp = value_scale * torch.atanh(value_predictions.reshape(-1).clamp(-0.999, 0.999))
-                cp_mae_total += torch.abs(predicted_cp[cp_mae_mask] - teacher_scores[cp_mae_mask]).sum().item()
-                cp_mae_samples += int(cp_mae_mask.sum())
+            value_targets = torch.where(
+                losses["value_mate"],
+                teacher_scores.sign(),
+                torch.tanh(teacher_scores.clamp(-900, 900) / value_scale),
+            )
+            value_target_mae_total += torch.abs(value_predictions.reshape(-1) - value_targets)[losses["value_valid"]].sum().item()
+            value_target_mae_samples += int(losses["value_valid"].sum())
+            cp_mask = (batch["teacher_score_kinds"] == CP_SCORE_KIND) & torch.isfinite(teacher_scores)
+            predicted_cp = value_scale * torch.atanh(value_predictions.reshape(-1).float().clamp(-0.999, 0.999))
+            absolute_error = torch.abs(predicted_cp - teacher_scores.float())
+            cp_mae_mask = cp_mask & (teacher_scores.abs() <= 300)
+            cp_mae_gt_300_mask = cp_mask & (teacher_scores.abs() > 300)
+            for mask, total_name in (
+                (cp_mae_mask, "low"),
+                (cp_mask, "all"),
+                (cp_mae_gt_300_mask, "high"),
+            ):
+                if mask.any():
+                    error_sum = absolute_error[mask].sum().item()
+                    count = int(mask.sum())
+                    if total_name == "low":
+                        cp_mae_total += error_sum
+                        cp_mae_samples += count
+                    elif total_name == "all":
+                        cp_mae_all_total += error_sum
+                        cp_mae_all_samples += count
+                    else:
+                        cp_mae_gt_300_total += error_sum
+                        cp_mae_gt_300_samples += count
+            sign_mask = cp_mask & (teacher_scores != 0)
+            if sign_mask.any():
+                sign_correct += int((value_predictions.reshape(-1)[sign_mask].sign() == teacher_scores[sign_mask].sign()).sum())
+                sign_samples += int(sign_mask.sum())
+            sign_gt_300_mask = sign_mask & (teacher_scores.abs() > 300)
+            if sign_gt_300_mask.any():
+                sign_gt_300_correct += int((value_predictions.reshape(-1)[sign_gt_300_mask].sign() == teacher_scores[sign_gt_300_mask].sign()).sum())
+                sign_gt_300_samples += int(sign_gt_300_mask.sum())
             if max_batches is not None and batch_index + 1 >= max_batches:
                 break
     denominator = max(samples, 1)
@@ -317,9 +404,19 @@ def evaluate(
         "samples": float(samples),
         "policy_valid": float(policy_valid),
         "value_valid": float(value_valid),
+        "value_mate": float(value_mate),
         "mate_policy": float(mate_policy),
+        "value_target_mae": value_target_mae_total / max(value_target_mae_samples, 1),
         "value_cp_mae_le_300": cp_mae_total / max(cp_mae_samples, 1),
         "value_cp_mae_samples": float(cp_mae_samples),
+        "value_cp_mae_all": cp_mae_all_total / max(cp_mae_all_samples, 1),
+        "value_cp_mae_all_samples": float(cp_mae_all_samples),
+        "value_cp_mae_gt_300": cp_mae_gt_300_total / max(cp_mae_gt_300_samples, 1),
+        "value_cp_mae_gt_300_samples": float(cp_mae_gt_300_samples),
+        "value_sign_accuracy": sign_correct / max(sign_samples, 1),
+        "value_sign_samples": float(sign_samples),
+        "value_sign_accuracy_gt_300": sign_gt_300_correct / max(sign_gt_300_samples, 1),
+        "value_sign_gt_300_samples": float(sign_gt_300_samples),
         "cp_policy_kl": cp_policy_kl_total / max(cp_policy_samples, 1),
         "cp_policy_samples": float(cp_policy_samples),
     }
@@ -346,6 +443,7 @@ def main() -> int:
     parser.add_argument("--prefetch-factor", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-steps", type=int)
+    parser.add_argument("--mirror", action="store_true", help="append horizontally mirrored training positions")
     warmup = parser.add_mutually_exclusive_group()
     warmup.add_argument("--warmup-ratio", type=float, default=0.05)
     warmup.add_argument("--warmup-steps", type=int)
@@ -453,6 +551,8 @@ def main() -> int:
             "global_step": global_step,
             "validation": validation_with_select,
             "best_j_select": best_j_select,
+            "schedule_total_steps": total_steps,
+            "schedule_warmup_steps": warmup_steps,
             "config": vars(args),
             "training_state": {
                 "next_epoch_index": next_epoch_index,
@@ -477,6 +577,28 @@ def main() -> int:
     resume_path = args.checkpoint_dir / "last.pt"
     if resume_path.exists():
         checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+        saved_schedule_total_steps = checkpoint.get("schedule_total_steps")
+        saved_schedule_warmup_steps = checkpoint.get("schedule_warmup_steps")
+        if saved_schedule_total_steps is None:
+            saved_config = checkpoint.get("config") or {}
+            saved_micro_batch_size = int(saved_config.get("micro_batch_size", args.micro_batch_size))
+            saved_global_batch_size = int(saved_config.get("global_batch_size", args.global_batch_size))
+            saved_accumulation_steps = saved_global_batch_size // saved_micro_batch_size
+            saved_updates_per_epoch = math.ceil(
+                math.ceil(len(train_dataset) / saved_micro_batch_size) / saved_accumulation_steps
+            )
+            saved_schedule_total_steps = int(saved_config.get("epochs", args.epochs)) * saved_updates_per_epoch
+            saved_schedule_warmup_steps = int(saved_config.get("warmup_steps") or max(
+                1, math.ceil(saved_schedule_total_steps * float(saved_config.get("warmup_ratio", 0.05)))
+            ))
+        if (
+            saved_schedule_total_steps != total_steps
+            or saved_schedule_warmup_steps != warmup_steps
+        ):
+            raise ValueError(
+                "resume schedule differs from checkpoint; keep --epochs and warmup settings unchanged "
+                "to preserve learning-rate continuity"
+            )
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
@@ -522,6 +644,8 @@ def main() -> int:
                 if epoch == start_epoch_index and batch_index < start_batch_index:
                     continue
                 batch = move_batch(batch, device)
+                if args.mirror:
+                    batch = with_horizontal_mirror(batch)
                 with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp_enabled):
                     policy_logits, value_predictions = model(batch["positions"])
                     losses = compute_losses(

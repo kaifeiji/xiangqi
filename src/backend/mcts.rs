@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+static ORT_INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
 static ONNX_MODELS: OnceLock<Mutex<HashMap<String, Arc<Mutex<OnnxEvaluator>>>>> = OnceLock::new();
 const ROOT_MIN_VISITS: u32 = 4;
 
@@ -75,8 +76,53 @@ pub struct MctsSearchResult {
     pub root_network_value: f32,
 }
 
+pub struct PolicySearchResult {
+    pub movement: (u8, u8),
+    pub candidates: Vec<(u8, u8, f32)>,
+    pub network_value: f32,
+}
+
+fn ensure_ort_initialized() -> Result<(), String> {
+    ORT_INITIALIZED
+        .get_or_init(|| {
+            let executable_directory = std::env::current_exe()
+                .map_err(|error| format!("failed to determine server executable path: {error}"))?
+                .parent()
+                .ok_or_else(|| "server executable has no parent directory".to_owned())?
+                .to_path_buf();
+            let ort_path = [
+                executable_directory.join("onnxruntime.dll"),
+                executable_directory.join("lib").join("onnxruntime.dll"),
+            ]
+            .into_iter()
+            .find(|path| path.is_file())
+            .ok_or_else(|| {
+                "ONNX Runtime DLL not found. Place onnxruntime.dll beside the server executable or in its lib directory."
+                    .to_owned()
+            })?;
+            match ort::init_from(&ort_path) {
+                Ok(environment) => {
+                    if environment.commit() {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "failed to initialize ONNX Runtime DLL: {} (ort environment was already configured)",
+                            ort_path.display()
+                        ))
+                    }
+                }
+                Err(error) => Err(format!(
+                    "failed to load ONNX Runtime DLL: {}: {error}",
+                    ort_path.display()
+                )),
+            }
+        })
+        .clone()
+}
+
 impl OnnxEvaluator {
     fn load(path: &str) -> Result<Self, String> {
+        ensure_ort_initialized()?;
         Session::builder()
             .map_err(|error| error.to_string())?
             .commit_from_file(path)
@@ -391,7 +437,10 @@ pub fn mcts_search_onnx(
     })
 }
 
-pub fn policy_search_onnx(root_fen: &str, model_path: &str) -> Result<(u8, u8), String> {
+pub fn policy_search_onnx(
+    root_fen: &str,
+    model_path: &str,
+) -> Result<PolicySearchResult, String> {
     let evaluator = evaluator_for(model_path)?;
     let mut evaluator = evaluator
         .lock()
@@ -401,17 +450,26 @@ pub fn policy_search_onnx(root_fen: &str, model_path: &str) -> Result<(u8, u8), 
     if legal.is_empty() {
         return Err("position has no legal moves".into());
     }
-    let (priors, _) = evaluator
+    let (priors, network_value) = evaluator
         .evaluate(&[root], std::slice::from_ref(&legal), 1.0)?
         .into_iter()
         .next()
         .ok_or_else(|| "missing evaluator result".to_owned())?;
-    legal
+    let candidates: Vec<_> = legal
         .into_iter()
         .zip(priors)
-        .max_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal))
-        .map(|(movement, _)| (movement.0 as u8, movement.1 as u8))
-        .ok_or_else(|| "policy has no legal move".to_owned())
+        .map(|((start, end), prior)| (start as u8, end as u8, prior))
+        .collect();
+    let movement = candidates
+        .iter()
+        .max_by(|left, right| left.2.partial_cmp(&right.2).unwrap_or(Ordering::Equal))
+        .map(|candidate| (candidate.0, candidate.1))
+        .ok_or_else(|| "policy has no legal move".to_owned())?;
+    Ok(PolicySearchResult {
+        movement,
+        candidates,
+        network_value,
+    })
 }
 
 pub(crate) fn search_onnx(

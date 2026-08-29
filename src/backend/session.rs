@@ -50,6 +50,7 @@ pub struct GameResponse {
     pub board: Vec<Option<String>>,
     pub last_error: Option<String>,
     pub mcts_debug: Option<serde_json::Value>,
+    pub policy_debug: Option<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -68,7 +69,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn step_model(&mut self) -> Result<((u8, u8), Option<Value>), String> {
+    pub fn step_model(&mut self) -> Result<((u8, u8), Option<Value>, Option<Value>), String> {
         if self.game.result_code().is_some() {
             return Err("game already finished".into());
         }
@@ -78,7 +79,8 @@ impl Session {
         let player_index = usize::from(self.game.side_to_move() == "b");
         let searched_fen = self.game.fen();
         let searched_side = self.game.side_to_move().to_owned();
-        let mut debug = None;
+        let mut mcts_debug = None;
+        let mut policy_debug = None;
         let movement = if let Some(movement) = self.game.opening_book_move() {
             movement
         } else {
@@ -94,7 +96,7 @@ impl Session {
                     (b'A' + result.movement.1 % 9) as char,
                     result.movement.1 / 9,
                 );
-                debug = Some(json!({
+                mcts_debug = Some(json!({
                     "searched_fen": searched_fen,
                     "searched_side": searched_side,
                     "selected_move": selected_move,
@@ -115,12 +117,30 @@ impl Session {
                         "prior": prior,
                     })).collect::<Vec<_>>(),
                 }));
+            } else if let Some(result) = result.policy_debug {
+                let selected_move = format!(
+                    "{}{}-{}{}",
+                    (b'A' + result.movement.0 % 9) as char,
+                    result.movement.0 / 9,
+                    (b'A' + result.movement.1 % 9) as char,
+                    result.movement.1 / 9,
+                );
+                policy_debug = Some(json!({
+                    "searched_fen": searched_fen,
+                    "searched_side": searched_side,
+                    "selected_move": selected_move,
+                    "network_value": result.network_value,
+                    "candidates": result.candidates.into_iter().map(|(start, end, probability)| json!({
+                        "move": format!("{}{}-{}{}", (b'A' + start % 9) as char, start / 9, (b'A' + end % 9) as char, end / 9),
+                        "probability": probability,
+                    })).collect::<Vec<_>>(),
+                }));
             }
             result.movement
         };
         self.apply(movement.0, movement.1)?;
         self.last_error = None;
-        Ok((movement, debug))
+        Ok((movement, mcts_debug, policy_debug))
     }
 
     pub fn apply_human_move(&mut self, movement: (u8, u8)) -> Result<(), String> {
@@ -169,11 +189,11 @@ pub async fn step_model(
     let mut games = state.games.write().await;
     let session = games.get_mut(&id).ok_or(ApiError::not_found())?;
     session.last_accessed_at = Instant::now();
-    let (_, debug) = session.step_model().map_err(|error| {
+    let (_, mcts_debug, policy_debug) = session.step_model().map_err(|error| {
         session.last_error = Some(error.clone());
         ApiError::bad_request(error)
     })?;
-    Ok(Json(snapshot(id, session, debug)?))
+    Ok(Json(snapshot(id, session, mcts_debug, policy_debug)?))
 }
 
 pub async fn create_game(
@@ -240,7 +260,7 @@ pub async fn create_game(
         last_accessed_at: Instant::now(),
         last_error: None,
     };
-    let response = snapshot(id, &session, None)?;
+    let response = snapshot(id, &session, None, None)?;
     state.games.write().await.insert(id, session);
     Ok(Json(response))
 }
@@ -252,7 +272,7 @@ pub async fn get_game(
     let mut games = state.games.write().await;
     let session = games.get_mut(&id).ok_or(ApiError::not_found())?;
     session.last_accessed_at = Instant::now();
-    Ok(Json(snapshot(id, session, None)?))
+    Ok(Json(snapshot(id, session, None, None)?))
 }
 
 pub async fn apply_move(
@@ -271,7 +291,7 @@ pub async fn apply_move(
     session
         .apply_human_move(movement)
         .map_err(ApiError::bad_request)?;
-    Ok(Json(snapshot(id, session, None)?))
+    Ok(Json(snapshot(id, session, None, None)?))
 }
 
 pub async fn undo(
@@ -285,7 +305,7 @@ pub async fn undo(
     session
         .undo(request.plies.unwrap_or(1))
         .map_err(ApiError::bad_request)?;
-    Ok(Json(snapshot(id, session, None)?))
+    Ok(Json(snapshot(id, session, None, None)?))
 }
 
 pub async fn close_game(State(state): State<AppState>, Path(id): Path<Uuid>) -> StatusCode {
@@ -297,6 +317,7 @@ fn snapshot(
     id: Uuid,
     session: &Session,
     mcts_debug: Option<serde_json::Value>,
+    policy_debug: Option<serde_json::Value>,
 ) -> Result<GameResponse, ApiError> {
     let side = session.game.side_to_move();
     let board = session
@@ -336,6 +357,7 @@ fn snapshot(
         board,
         last_error: session.last_error.clone(),
         mcts_debug,
+        policy_debug,
     })
 }
 

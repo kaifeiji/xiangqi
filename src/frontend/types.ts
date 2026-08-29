@@ -21,6 +21,7 @@ export interface Game {
   board: BoardCell[][]
   last_error: string | null
   mcts_debug?: MctsDebug | null
+  policy_debug?: PolicyDebug | null
 }
 
 export interface MctsDebug {
@@ -36,6 +37,14 @@ export interface MctsDebug {
   legal_cache_misses?: number
   root_visits_before?: Record<string, number>
   root_children: Array<{ move: string; visits: number; new_visits?: number; q: number; prior: number }>
+}
+
+export interface PolicyDebug {
+  searched_fen?: string
+  searched_side?: Side
+  selected_move: string
+  network_value: number
+  candidates: Array<{ move: string; probability: number }>
 }
 
 export interface ModelOption {
@@ -58,4 +67,5 @@ export interface CompactArchiveSnapshot {
   rule60: number
   result: string | null
   mcts_debug?: MctsDebug | null
+  policy_debug?: PolicyDebug | null
 }

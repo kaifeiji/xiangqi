@@ -38,9 +38,10 @@ cargo build --release --bin xiangqi-server
 cargo test
 ```
 
-当前 GNU Windows target 不支持 ort-sys 自动下载 runtime。首次运行请将 DLL 准备到项目根目录：
+当前 GNU Windows target 不支持 ort-sys 自动下载 runtime。服务启动和 `/health` 不会强制加载 ONNX Runtime；首次使用 ONNX 模型推理时，请将匹配 `ort` crate API feature 的 `onnxruntime.dll` 放在服务程序同级目录，或放入其 `lib/` 子目录。当前 Rust 依赖关闭了 `ort` 默认 feature，并显式启用 `api-22`，用于匹配 ONNX Runtime 1.22.x，例如 CUDA 12 版本的 runtime。
 
 ```powershell
+Copy-Item C:\path\to\onnxruntime.dll .\target\release\onnxruntime.dll
 .\target\release\xiangqi-server.exe
 ```
 

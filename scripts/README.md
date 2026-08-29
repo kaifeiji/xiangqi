@@ -137,7 +137,7 @@ uv run python scripts\prepare_current_view.py `
 
 `train.py --mirror` 在每个训练 batch 内追加左右镜像样本，不生成新的 NPY shard。它沿棋盘宽度翻转 positions，并把每个 start/end 格点从 `9r+c` 映射为 `9r+(8-c)`；value 标签直接复制。validation、test、推理均不镜像。
 
-镜像会使该 batch 的实际前向/反向样本数加倍，因此显存和训练时间也随之增加；`--batch-size` 应按未镜像样本理解。该开关当前只适用于 `train.py` 的 start/end policy 标签。`train_pikafish.py` 尚未实现 `--mirror`，不能在蒸馏训练命令中假设存在该数据增强。
+镜像会使该 batch 的实际前向/反向样本数加倍，因此显存和训练时间也随之增加；`--batch-size` 应按未镜像样本理解。`train_pikafish.py --mirror` 会同步镜像 8100 联合动作 ID、候选动作与 ragged 合法着集合；validation、test、推理均不镜像。
 
 ## Pikafish 标注 value
 
@@ -362,7 +362,7 @@ $$
 
 训练时只对合法着归一化，并以稀疏 $q$ 计算交叉熵；Top-5 外的合法着不是非法走法，也不应从 softmax 分母移除。`teacher.bestmove` 仅作与 rank-PV1 的一致性审计，不单独构造标签。
 
-任一 candidate 为 mate 时，该局面进入 mate policy slice，不与 cp softmax 或温度混用。以 rank 最小 candidate 为唯一硬标签，因而同时覆盖最短成杀、唯一防杀和延缓被杀。该样本不参与 value loss。mate slice 的逐样本 policy loss 权重为 $4$，cp slice 权重为 $1$：
+任一 candidate 为 mate 时，该局面进入 mate policy slice，不与 cp softmax 或温度混用。以 rank 最小 candidate 为唯一硬标签，因而同时覆盖最短成杀、唯一防杀和延缓被杀。mate slice 的逐样本 policy loss 权重为 $4$，cp slice 权重为 $1$：
 
 $$
 L_{\mathrm{policy}}=
@@ -424,7 +424,7 @@ $$
 V(s) = \tanh(\operatorname{clip}(\mathrm{cp}, -900, 900) / K)
 $$
 
-其中 `K=400` 是首个候选，因为它约等于当前 shard 的 `abs(cp)` P95；它只是压缩尺度，不是已标定的胜率，也不是通用常数。模型 value head 最后一层必须同步添加 `tanh`，以 Huber loss（$\delta=0.1$）拟合该标签；MSE 仅作为对照指标，不作为首个优化目标。mate root score 不构造 value label。
+其中 `K=400` 是首个候选，因为它约等于当前 shard 的 `abs(cp)` P95；它只是压缩尺度，不是已标定的胜率，也不是通用常数。模型 value head 最后一层必须同步添加 `tanh`，以 Huber loss（$\delta=0.1$）拟合该标签；MSE 仅作为对照指标，不作为首个优化目标。mate root score 使用符号目标 $\pm1$，并以 4 倍 value 权重参与训练。
 
 首轮扫描：
 
@@ -562,7 +562,7 @@ global/micro batch 改变时，学习率不按线性规则放大，必须与 war
 
 - 数据：各 split 的游戏数、局面数、policy/value 有效数、排除原因计数，以及 ply 与局面阶段分桶分布；
 - policy：cp slice 的 candidate KL、Pika bestmove Top-1、candidate Top-5 和候选概率质量；mate slice 的 hard-label Top-1；
-- value：有界 target MAE、Pearson/Spearman、按 $|V|$ 分桶的 MAE、符号正确率与输出饱和比例；另报告 $|cp|\le300$ 的原始 cp-MAE；
+- value：有界 target MAE、全量与 $|cp|\le300$ / $|cp|>300$ 的原始 cp-MAE、全量与高 cp 的符号正确率、mate value 样本数和输出饱和比例；
 - 人类审计：人类 move 的 Pika Top-1/Top-5 命中率；
 - 对称性：镜像前后 candidate 概率与 value 的差异；current-view 对换前后的 value 是否变号。
 
@@ -570,8 +570,9 @@ global/micro batch 改变时，学习率不按线性规则放大，必须与 war
 
 $$
 J_{\mathrm{select}}=
-\frac{1}{2}\frac{KL}{KL_{\mathrm{base}}}+
-\frac{1}{2}\frac{MAE_{\mathrm{cp},|cp|\le300}}{MAE_{\mathrm{cp},\mathrm{base},|cp|\le300}}
+0.4\frac{KL}{KL_{\mathrm{base}}}+
+0.4\frac{MAE_{\mathrm{cp},|cp|\le300}}{MAE_{\mathrm{cp},\mathrm{base},|cp|\le300}}+
+0.2(1-\mathrm{sign\ accuracy}_{\mathrm{cp}})
 $$
 
 阶段一每个组合以一个固定 seed 训练 3 epochs，按 $J_{\mathrm{select}}$ 取前三名。阶段二仅让这三个组合各训练三个固定 seed，并以三个 seed 的 validation 均值选择胜者；均值接近时优先标准差更小者。所有选择还须满足：cp-policy、cp-value 和 mate-policy 均不劣于当前最佳值的预设门槛；mate-policy 使用 hard-label Top-1，最多下降 2 个百分点。若 validation mate 样本少于 500，该门槛只告警不阻止选择。

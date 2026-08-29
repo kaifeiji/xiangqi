@@ -1,6 +1,6 @@
 use crate::position::Position;
 use crate::rules::RuleState;
-use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 const MAINSTREAM_OPENING_MOVES: &[((u8, u8), u32)] = &[
     ((19, 22), 24), // B2-E2, central cannon
@@ -118,12 +118,12 @@ impl Game {
         if legal_openings.is_empty() {
             return None;
         }
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()?
-            .as_nanos();
         let total_weight: u32 = legal_openings.iter().map(|&(_, weight)| weight).sum();
-        let mut choice = (seed % u128::from(total_weight)) as u32;
+        let mut choice = u32::from_le_bytes(
+            Uuid::new_v4().as_bytes()[..4]
+                .try_into()
+                .expect("UUID has 16 bytes"),
+        ) % total_weight;
         for &((start, end), weight) in &legal_openings {
             if choice < weight {
                 return Some((start, end));
@@ -133,19 +133,22 @@ impl Game {
         legal_openings.last().map(|&((start, end), _)| (start, end))
     }
 
-    pub fn policy_search(&self, model_path: &str) -> Result<(u8, u8), String> {
+    pub fn policy_search(
+        &self,
+        model_path: &str,
+    ) -> Result<crate::mcts::PolicySearchResult, String> {
         if self.result().is_some() {
             return Err("game already finished".into());
         }
-        let movement = crate::mcts::policy_search_onnx(&self.fen(), model_path)?;
+        let result = crate::mcts::policy_search_onnx(&self.fen(), model_path)?;
         if !self
             .position
             .legal()?
-            .contains(&(movement.0 as usize, movement.1 as usize))
+            .contains(&(result.movement.0 as usize, result.movement.1 as usize))
         {
             return Err("policy model returned an illegal move".into());
         }
-        Ok(movement)
+        Ok(result)
     }
 
     pub fn in_check(&self) -> Result<bool, String> {

@@ -33,31 +33,6 @@ fn load_local_env() {
 #[tokio::main]
 async fn main() {
     load_local_env();
-    let ort_path = std::env::var_os("ORT_DYLIB_PATH")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("LOCALAPPDATA").map(|local_app_data| {
-                std::path::PathBuf::from(local_app_data)
-                    .join("Xiangqi")
-                    .join("onnxruntime.dll")
-            })
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from("onnxruntime.dll"));
-    if !ort_path.is_file() {
-        eprintln!("ONNX Runtime DLL not found: {}", ort_path.display());
-        eprintln!("Set ORT_DYLIB_PATH to the full path of onnxruntime.dll.");
-        std::process::exit(1);
-    }
-    if !ort::init_from(&ort_path)
-        .map(|environment| environment.commit())
-        .unwrap_or(false)
-    {
-        eprintln!(
-            "failed to initialize ONNX Runtime DLL: {}",
-            ort_path.display()
-        );
-        std::process::exit(1);
-    }
     let host = std::env::var("XIANGQI_HOST").unwrap_or_else(|_| "127.0.0.1".to_owned());
     let port = std::env::var("XIANGQI_PORT")
         .ok()

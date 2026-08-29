@@ -270,13 +270,15 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
                 <option value="10000">10000次</option>
               </select>
             </label>}
-          {!game && <button type="button" onClick={() => void startGame()} disabled={startingGame || !modelsLoaded || !models.length}>
-            {startingGame ? '创建中...' : '开始新对局'}
-          </button>}
-          {game && <button type="button" onClick={endGame} disabled={startingGame || pendingHumanMove || modelThinking}>结束对局</button>}
-          <button type="button" onClick={() => void undoMove()} disabled={!game || Boolean(game.result) || snapshots.length < 2 || pendingHumanMove || modelThinking}>
-            悔棋
-          </button>
+          <div className="game-actions">
+            {!game && <button type="button" onClick={() => void startGame()} disabled={startingGame || !modelsLoaded || !models.length}>
+              {startingGame ? '创建中...' : '开始'}
+            </button>}
+            {game && <button type="button" onClick={endGame} disabled={startingGame || pendingHumanMove || modelThinking}>结束</button>}
+            {game && <button type="button" onClick={() => void undoMove()} disabled={Boolean(game.result) || snapshots.length < 2 || pendingHumanMove || modelThinking}>
+              悔棋
+            </button>}
+          </div>
         </aside>
         <MoveRecord
           snapshots={snapshots}
