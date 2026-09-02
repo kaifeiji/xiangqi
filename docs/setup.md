@@ -58,9 +58,11 @@ Rust Web 服务启动时会读取项目根目录的 `.env.local`。
 MCTS_BATCH_SIZE=8
 MCTS_POLICY_TEMPERATURE=1.25
 MCTS_EXPLORATION=1.25
+MCTS_Q_GUARD_MIN_VISITS=25
+MCTS_Q_GUARD_MIN_GAP=0.15
 ```
 
-`MCTS_BATCH_SIZE` 控制批量叶节点评估大小。`MCTS_POLICY_TEMPERATURE` 用于避免策略先验过度集中。`MCTS_EXPLORATION` 是 PUCT 探索常数。
+`MCTS_BATCH_SIZE` 控制批量叶节点评估大小。`MCTS_POLICY_TEMPERATURE` 用于避免策略先验过度集中。`MCTS_EXPLORATION` 是 PUCT 探索常数。`MCTS_Q_GUARD_MIN_VISITS` 与 `MCTS_Q_GUARD_MIN_GAP` 控制根节点最终选着的 Q 兜底：当 Q 最佳候选访问数达到下限，且当前方 Q 比 visits 第一高出阈值时，最终选 Q 最佳候选。
 
 ## Web 服务
 

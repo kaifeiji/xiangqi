@@ -8,6 +8,10 @@
   background: #e9ddc4;
 }
 
+html {
+  scrollbar-gutter: stable;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -449,7 +453,7 @@ button.candidate-row.selected {
 .benchmark-form label { display: grid; min-width: 0; gap: 5px; color: #6f5136; font-size: 13px; }
 .benchmark-form select { width: 100%; min-width: 0; }
 .benchmark-form select, .benchmark-form button { min-height: 38px; padding: 6px 10px; border: 1px solid #7c5a39; border-radius: 4px; background: #fffaf0; color: inherit; font: inherit; }
-.benchmark-form button, .benchmark-cancel { cursor: pointer; background: #7d2e1f; color: #fff9ea; }
+.benchmark-form button, .benchmark-cancel, .benchmark-review { cursor: pointer; background: #7d2e1f; color: #fff9ea; }
 .benchmark-list { display: grid; gap: 10px; }
 .benchmark-empty { margin: 0; padding: 26px; color: #765e45; text-align: center; }
 .benchmark-item { display: grid; grid-template-columns: minmax(0, 1fr) 58px; border: 1px solid #9b7652; border-radius: 6px; background: #f6edda; }
@@ -475,14 +479,24 @@ button.candidate-row.selected {
 .benchmark-actions { display: grid; grid-column: 2; align-content: start; padding: 8px 8px 0 0; }
 .benchmark-cancel { min-height: 28px; padding: 3px 8px; border: 1px solid #7c5a39; border-radius: 4px; font: inherit; font-size: 12px; }
 .benchmark-games { display: grid; grid-column: 1 / -1; gap: 5px; margin: 0; padding: 0 12px 12px 38px; }
-.benchmark-games li { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(130px, 0.9fr) minmax(200px, 1.3fr) minmax(215px, 1.3fr); gap: 14px; align-items: center; padding: 11px 12px; background: #fffaf0; font-size: 12px; font-variant-numeric: tabular-nums; }
+.benchmark-games li { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(130px, 0.9fr) minmax(200px, 1.3fr) minmax(215px, 1.3fr) auto; gap: 14px; align-items: center; padding: 11px 12px; background: #fffaf0; font-size: 12px; font-variant-numeric: tabular-nums; }
 .benchmark-games li > span { display: grid; min-width: 0; gap: 4px; color: #765e45; }
 .benchmark-game-opening strong, .benchmark-game-result strong, .benchmark-game-time strong { color: #29170c; }
 .benchmark-game-sides { padding-left: 14px; border-left: 1px solid #e0c9aa; }
 .benchmark-game-sides span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .benchmark-game-time { padding-left: 14px; border-left: 1px solid #e0c9aa; }
-.benchmark-game-moves { grid-column: 1 / -1; max-height: 4.6em; padding-top: 7px; overflow-y: auto; border-top: 1px solid #e0c9aa; color: #765e45; font-family: "Cascadia Mono", Consolas, monospace; font-size: 11px; line-height: 1.5; white-space: normal; word-break: break-all; }
+.benchmark-review { min-height: 28px; padding: 3px 8px; border: 1px solid #7c5a39; border-radius: 4px; font: inherit; font-size: 12px; }
 .benchmark-games li em { grid-column: 1 / -1; color: #9c251d; font-style: normal; }
+.benchmark-dialog-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; padding: 24px; place-items: center; background: rgb(41 23 12 / 45%); }
+.benchmark-dialog { display: grid; width: min(1080px, 100%); grid-template-rows: auto auto; border: 1px solid #7c5a39; border-radius: 6px; background: #f6edda; box-shadow: 0 18px 48px rgb(41 23 12 / 28%); }
+.benchmark-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 14px; border-bottom: 1px solid #d2b48c; }
+.benchmark-dialog-header div { display: grid; min-width: 0; gap: 3px; }
+.benchmark-dialog-header span { overflow: hidden; color: #765e45; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.benchmark-dialog-body { display: grid; justify-content: center; padding: 18px; overflow: hidden; }
+.benchmark-dialog-body.watching { overflow: hidden; }
+.benchmark-dialog-body.complete { grid-template-columns: minmax(0, 540px) minmax(260px, 1fr); gap: 18px; justify-content: stretch; align-items: stretch; }
+.benchmark-dialog-body > .xiangqiground { width: 540px; height: 600px; }
+.benchmark-dialog-body .move-record { height: 550px; min-height: 0; margin: 25px 0; }
 
 @media (max-width: 760px) {
   .app-shell {
@@ -511,6 +525,10 @@ button.candidate-row.selected {
 
   .benchmark-item { grid-template-columns: minmax(0, 1fr) 58px; }
   .benchmark-form, .benchmark-summary, .benchmark-games li { grid-template-columns: 1fr; }
+  .benchmark-dialog-body,
+  .benchmark-dialog-body.complete { grid-template-columns: 1fr; overflow: auto; }
+  .benchmark-dialog-body > .xiangqiground { width: min(100%, 540px); height: auto; justify-self: center; }
+  .benchmark-dialog-body .move-record { height: min(520px, calc(100vh - 150px)); margin: 0; }
   .benchmark-summary { gap: 14px; }
   .benchmark-metrics, .benchmark-time, .benchmark-game-sides, .benchmark-game-time { padding-left: 0; border-left: 0; }
   .benchmark-games { padding-left: 12px; }

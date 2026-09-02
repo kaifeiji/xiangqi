@@ -171,6 +171,30 @@ FP16 实验已移除：当前生产路径保留 FP32 ONNX + CUDA EP，避免可�
 
 以 c192 基线估算：若 TensorRT FP16 让 ONNX 部分 `2x`，总时延约从 `5.9s` 降到 `3.8s`；要稳定进入 `3s`，还需同时优化 CPU 扩展。
 
+### Q Guard 与 Policy Temperature（medium）
+
+历史对局扫描显示，MCTS 不是普遍 selected move 异常，`selected_move` 都能在 root children 中找到，且通常等于 visits 第一。但有 24 个 root 满足：Q 最佳候选访问数至少 `25`，且当前方 Q 比 visits 第一高至少 `0.15`。这类点集中在 tactical/送子历史存档和当前 1000 sims benchmark。
+
+当前采用保守 Q guard 默认值：
+
+```text
+MCTS_Q_GUARD_MIN_VISITS=25
+MCTS_Q_GUARD_MIN_GAP=0.15
+```
+
+固定 FEN 测试结论：
+
+| 局面 | sims | exploration | policy temp | 结果 |
+|---|---:|---:|---:|---|
+| game6 | 1000 | 1.25 | 1.25 | 选 `F2-E2`，Q 最佳 `F2-H2` |
+| game6 | 1000 | 0.75 | 2.0 | 仍选 `F2-E2`，但 `F2-G2` visits 接近 |
+| game6 | 5000 | 0.75 | 1.25 | 选 `F2-G2`，和 Q 最佳一致 |
+| game7 | 1000 | 1.25 | 1.25 | `C7-E6` 被 `prior=0.625` 锁住 |
+| game7 | 1000 | 0.75 | 1.25/1.5 | 改选 `I3-I4`，和 Q 最佳一致 |
+| game7 | 1000 | 0.75 | 2.0 | 又回到 `C7-E6`，过度软化变差 |
+
+结论：policy 不是整体过尖，合法着数不少于 8 的 root 中 top1 prior 均值约 `0.226`。问题是少数局面存在错误高 prior 或 visits/Q 未收敛。训练侧暂不建议单纯提高 distillation temperature；推理侧保留 Q guard。`MCTS_EXPLORATION=0.75` 只在 game7 探针中优于 `1.25`，尚不足以替换默认值；`MCTS_POLICY_TEMPERATURE=1.5` 未显示明确额外收益，`2.0` 在 game7 退化。后续 benchmark 应固定 temperature=`1.25`，只比较 exploration=`0.75/1.25`。
+
 ## Benchmark 结果
 
 ### 纯 policy 对局的循环问题（strong）
@@ -189,6 +213,12 @@ FP16 实验已移除：当前生产路径保留 FP32 ONNX + CUDA EP，避免可�
 | `20260902-132620-231.json` | 0 | 26/26 | 普通胜负 23，`draw_natural_limit=3`，无长将/长捉/三次重复 |
 
 结论：简化反循环规则显著改善纯 policy benchmark 的循环终局分布；最终判断还需要继续跑同模型、同开局库的对照。
+
+### Benchmark 暂停与可恢复存档（strong）
+
+benchmark 不再将取消视为终止结果。暂停时已完成对局和中断盘的 snapshots 都会持久化；恢复时从该盘的 `initial_fen` 和最后一个 snapshot 重建 `Game`，继续未完成对局。存档不再记录 `moves` 或 `final_fen`，避免并行维护两份可能不一致的对局状态。
+
+恢复只适用于未完成且未失败的任务。任务 JSON 在服务重启后从 `BENCHMARK_PATH` 重新加载，因此暂停任务不依赖原进程存活。
 
 ### 1000 sims benchmark 成本（medium）
 

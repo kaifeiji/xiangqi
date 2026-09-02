@@ -51,6 +51,8 @@ export function XiangqiBoard({ active, game, orientation = 'white', lastMove, re
     } else {
       boardRef.current = Xiangqiground(containerRef.current, config)
     }
+    const frame = window.requestAnimationFrame(() => boardRef.current?.redrawAll())
+    return () => window.cancelAnimationFrame(frame)
   }, [game, lastMove, onMove])
 
   useEffect(() => {

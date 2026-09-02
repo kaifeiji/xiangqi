@@ -25,13 +25,13 @@ B2-E2（炮二平五）
 - `started_at_ms` / `finished_at_ms` / `elapsed_ms`：单盘计时。
 - `result`：胜负或和棋原因。
 - `total_plies` / `rule60`：总 ply 和自然限着计数。
-- `moves`：ICCS 复盘记录，用于排障。
-- `final_fen`：终局 FEN。
+- `initial_fen`：该盘初始 FEN。
+- `snapshots`：按存档格式保存的逐步局面，供观看和复盘。
 - `repetition_cycle_plies`：三次重复时的循环区间。
 - `error`：该盘失败原因。
 
-前端卡片只展示摘要，不显示完整 `moves` 字符串，避免超长文本污染界面。需要排查异常对局时直接打开 JSON 文件。
+任务可暂停；JSON 会保留已完成对局，以及中断盘截至暂停时的 `snapshots`。恢复时使用同一任务和模型配置，从中断盘的 `initial_fen` 加最后一个 snapshot 重建局面后继续；不保存或重放 `moves`、`final_fen`。
 
-## 前端刷新
+## 生命周期
 
-Benchmark 页面只在存在运行中任务时轮询，轮询间隔为 5 秒。列表按 `started_at_ms` 倒序显示，最新任务在最上方。
+任务状态为 `running`、`paused`、`completed` 或 `failed`。已完成或失败任务不可恢复；暂停的未完成任务可以恢复。进程重启后会从 `BENCHMARK_PATH` 加载 JSON，暂停任务仍可恢复。

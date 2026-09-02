@@ -3,6 +3,7 @@ use crate::position::Position;
 use crate::rules::RuleState;
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub struct Game {
     position: Position,
     rules: RuleState,

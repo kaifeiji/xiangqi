@@ -56,6 +56,8 @@ export interface ModelOption {
 export interface BenchmarkGame {
   number: number
   opening_move: string
+  initial_fen: string
+  snapshots: CompactArchiveSnapshot[]
   started_at_ms: number
   finished_at_ms: number
   result: string | null
@@ -63,8 +65,6 @@ export interface BenchmarkGame {
   rule60: number
   elapsed_ms: number
   error: string | null
-  moves: string[]
-  final_fen: string
   repetition_cycle_plies: [number, number] | null
 }
 
@@ -76,7 +76,7 @@ export interface Benchmark {
   games_requested: number
   started_at_ms: number
   finished_at_ms: number | null
-  status: 'running' | 'completed' | 'cancelled' | 'failed'
+  status: 'running' | 'paused' | 'completed' | 'cancelled' | 'failed'
   first_wins: number
   second_wins: number
   draws: number

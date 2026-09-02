@@ -211,6 +211,15 @@ struct RuleLegalChildren {
     repeated: Vec<RuleLegalChild>,
 }
 
+const ROOT_Q_GUARD_MIN_VISITS: u32 = 25;
+const ROOT_Q_GUARD_MIN_GAP: f32 = 0.15;
+
+#[derive(Clone, Copy)]
+struct RootQGuard {
+    min_visits: u32,
+    min_gap: f32,
+}
+
 fn evaluator_for(model_path: &str) -> Result<Arc<Mutex<OnnxEvaluator>>, String> {
     let models = ONNX_MODELS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut models = models
@@ -287,6 +296,43 @@ fn backup(nodes: &mut [Node], path: &[usize], mut value: f32) {
         nodes[index].value_sum += value;
         value = -value;
     }
+}
+
+fn root_child_current_q(node: &Node) -> Option<f32> {
+    (node.visits > 0).then_some(-node.value_sum / node.visits as f32)
+}
+
+fn select_root_move<'a>(children: &'a [(u8, u8, usize)], nodes: &[Node]) -> Option<&'a (u8, u8, usize)> {
+    select_root_move_with_q_guard(children, nodes, root_q_guard_from_environment())
+}
+
+fn select_root_move_with_q_guard<'a>(children: &'a [(u8, u8, usize)], nodes: &[Node], q_guard: RootQGuard) -> Option<&'a (u8, u8, usize)> {
+    let visits_best = children.iter().max_by_key(|child| nodes[child.2].visits)?;
+    let visits_best_q = root_child_current_q(&nodes[visits_best.2]).unwrap_or(f32::NEG_INFINITY);
+    let q_best = children
+        .iter()
+        .filter(|child| nodes[child.2].visits >= q_guard.min_visits)
+        .filter_map(|child| root_child_current_q(&nodes[child.2]).map(|q| (child, q)))
+        .max_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal));
+    if let Some((q_best, q_best_value)) = q_best {
+        if q_best.2 != visits_best.2 && q_best_value - visits_best_q >= q_guard.min_gap {
+            return Some(q_best);
+        }
+    }
+    Some(visits_best)
+}
+
+fn root_q_guard_from_environment() -> RootQGuard {
+    let min_visits = std::env::var("MCTS_Q_GUARD_MIN_VISITS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(ROOT_Q_GUARD_MIN_VISITS);
+    let min_gap = std::env::var("MCTS_Q_GUARD_MIN_GAP")
+        .ok()
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(ROOT_Q_GUARD_MIN_GAP);
+    RootQGuard { min_visits, min_gap }
 }
 
 fn release_virtual_loss(nodes: &mut [Node], path: &[usize]) {
@@ -446,10 +492,7 @@ fn mcts_search_onnx_from_state(
         completed += completed_this_batch;
     }
     let root = &nodes[0];
-    let best = root
-        .children
-        .iter()
-        .max_by_key(|child| nodes[child.2].visits)
+    let best = select_root_move(&root.children, &nodes)
         .ok_or_else(|| "MCTS root has no moves legal under game rules".to_owned())?;
     let stats = root
         .children
@@ -649,6 +692,46 @@ mod tests {
         let (_, leaf, _) = select(&mut nodes, 1.25, 8);
 
         assert_eq!(leaf, 2);
+    }
+
+    #[test]
+    fn root_q_guard_overrides_visits_when_q_gap_is_large() {
+        let position = Position::parse(crate::START_FEN).unwrap();
+        let rules = RuleState::new(crate::START_FEN, &position).unwrap();
+        let mut nodes = vec![
+            Node::new(position, rules.clone(), 1.0),
+            Node::new(position, rules.clone(), 0.6),
+            Node::new(position, rules, 0.1),
+        ];
+        nodes[0].children = vec![(0, 1, 1), (0, 2, 2)];
+        nodes[1].visits = 200;
+        nodes[1].value_sum = 80.0;
+        nodes[2].visits = ROOT_Q_GUARD_MIN_VISITS;
+        nodes[2].value_sum = 0.0;
+
+        let selected = select_root_move_with_q_guard(&nodes[0].children, &nodes, RootQGuard { min_visits: ROOT_Q_GUARD_MIN_VISITS, min_gap: ROOT_Q_GUARD_MIN_GAP }).unwrap();
+
+        assert_eq!((selected.0, selected.1), (0, 2));
+    }
+
+    #[test]
+    fn root_q_guard_keeps_visits_when_q_candidate_has_too_few_visits() {
+        let position = Position::parse(crate::START_FEN).unwrap();
+        let rules = RuleState::new(crate::START_FEN, &position).unwrap();
+        let mut nodes = vec![
+            Node::new(position, rules.clone(), 1.0),
+            Node::new(position, rules.clone(), 0.6),
+            Node::new(position, rules, 0.1),
+        ];
+        nodes[0].children = vec![(0, 1, 1), (0, 2, 2)];
+        nodes[1].visits = 200;
+        nodes[1].value_sum = 80.0;
+        nodes[2].visits = ROOT_Q_GUARD_MIN_VISITS - 1;
+        nodes[2].value_sum = 0.0;
+
+        let selected = select_root_move_with_q_guard(&nodes[0].children, &nodes, RootQGuard { min_visits: ROOT_Q_GUARD_MIN_VISITS, min_gap: ROOT_Q_GUARD_MIN_GAP }).unwrap();
+
+        assert_eq!((selected.0, selected.1), (0, 1));
     }
 
     #[test]

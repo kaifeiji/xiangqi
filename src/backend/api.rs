@@ -10,6 +10,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/models", get(crate::models::list))
         .route("/api/benchmarks", get(crate::benchmark::list).post(crate::benchmark::create))
         .route("/api/benchmarks/{id}", get(crate::benchmark::get).delete(crate::benchmark::cancel))
+        .route("/api/benchmarks/{id}/resume", post(crate::benchmark::resume))
         .route("/api/games", post(session::create_game))
         .route("/api/games/{id}", get(session::get_game))
         .route("/api/games/{id}/move", post(session::apply_move))

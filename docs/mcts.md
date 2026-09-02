@@ -64,6 +64,8 @@ P6b 已完成第一版自动 profile：根节点被将军时使用 `exploration=
 
 P6c 目前只有按根节点复杂度选择的静态 profile，尚未加入随 visits 动态变化的 `c_puct` 公式。当前代码也没有“policy 概率 25 次方锐化”的实现证据，因此不根据该假设强行偏向深搜。
 
+根节点最终选着以 visits 最大为主；Q guard 只在 Q 最佳候选的 visits 不低于 `MCTS_Q_GUARD_MIN_VISITS`，且当前方 Q 比 visits 第一高出 `MCTS_Q_GUARD_MIN_GAP` 时介入。默认值为 `25`、`0.15`，可通过环境变量调整。
+
 ## P7：并行搜索
 
 真正的多线程/多进程 MCTS 才需要线程安全统计和 virtual loss。当前 batch selection 已有临时 virtual reservation，单线程路径不需要额外实现 P7。
@@ -120,6 +122,46 @@ CPU 扩展等约 1.529s
 `average_leaf_depth=3.5`、`max_leaf_depth=5` 表示大多数 NN value 评估发生在根后约 3 到 4 个半回合，是偏浅的 policy-guided MCTS。后期出现 `max_leaf_depth=16` 是健康信号：说明访问逐渐集中后，主变能继续向下扩展；但单个最大值不能代表整体搜索深度。
 
 后续分析应记录 depth 分位数，而不只看平均和最大：`P50/P90/P99/max` 比 `average/max` 更能区分“整体浅”与“少数主变深入”。
+
+### 根节点 Q Guard
+
+最终落子仍以 visits 最大为主，这是 AlphaZero 风格的标准选着方式。但历史对局显示，少数局面中 policy prior 会把 visits 锁在当前方 Q 明显较差的候选上。当前加入保守 Q guard：
+
+```text
+MCTS_Q_GUARD_MIN_VISITS=25
+MCTS_Q_GUARD_MIN_GAP=0.15
+```
+
+若 Q 最佳候选访问数达到下限，且当前方 Q 比 visits 第一高出阈值，则最终选择 Q 最佳候选。扫描历史 `benchmark/` 和 `xiangqi-test/` 的 1255 个 MCTS root，该默认值触发约 24 次；不是把 MCTS 改为纯 Q 贪心，而是拦截明显 visits/prior 失真。
+
+固定 FEN 探针结果：
+
+```text
+game6, 1000 sims, exploration=1.25: F2-E2，Q 最佳 F2-H2
+game6, 5000 sims, exploration=0.75: F2-G2，和 Q 最佳一致
+
+game7, 1000 sims, exploration=1.25: C7-E6，被 prior=0.625 锁住
+game7, 5000 sims, exploration=1.25: 改为 E8-G8，但仍未达到最佳 Q
+```
+
+该结果说明：一部分问题可通过更多 simulations 或更低 exploration 缓解；一部分是局部高 prior 错误，需要 Q guard 兜底或后续训练诊断。
+
+### Policy Temperature 探针
+
+推理温度 `MCTS_POLICY_TEMPERATURE` 会把 logits 转 prior 时软化或锐化分布。历史 benchmark root 统计显示整体 policy 并不普遍过尖：合法着数不少于 8 的 root 中，top1 prior 均值约 `0.226`，P90 约 `0.349`，top1 大于 `0.5` 的比例约 `57/1220`。
+
+固定 FEN 探针结果显示，温度不是单调收益：
+
+```text
+game6, 1000 sims, exploration=0.75:
+temp=1.25/1.5/2.0 均仍选 F2-E2，但 temp=2.0 使 F2-G2 visits 接近。
+
+game7, 1000 sims, exploration=0.75:
+temp=1.25/1.5 均选 I3-I4，和 Q 最佳一致；
+temp=2.0 又回到 C7-E6，说明过度软化会让搜索变散。
+```
+
+因此当前不把 `MCTS_POLICY_TEMPERATURE` 默认提高到 `2.0`。若实验，可优先尝试 `1.5`，并和 `MCTS_EXPLORATION=0.75` 成对测试。
 
 ### FP16 与 TensorRT 取舍
 

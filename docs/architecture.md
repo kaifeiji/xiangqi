@@ -59,8 +59,6 @@ Vite 静态资源目录为 `src/frontend/public/`，由 `vite.config.ts` 的 `pu
 - `root_children[].q` 表示对应根候选的搜索后平均 value。
 - `root_network_value` 是模型对根局面的直接 value，不是某个具体 move 的价值。
 
-Benchmark 列表不显示完整着法串，避免超长文本污染界面；详细走法保留在保存的 benchmark JSON 中。
-
 ## 开局库行为
 
 模型方会在完整初始局面且轮到红方时使用内置主流开局首着池。人机对弈不会替人类预走第一着：
@@ -76,9 +74,7 @@ Benchmark 列表不显示完整着法串，避免超长文本污染界面；详�
 
 模型 benchmark 是后端后台任务，不依赖棋盘 UI 驱动。赛制固定为主流开局库成对换色：每个开局 A/B 各执红一次，因此总盘数为 `MAINSTREAM_OPENINGS.len() * 2`。这比“完全禁书”更稳定，因为纯策略模型常会集中选择相同首着，导致样本多样性不足。
 
-Benchmark 结果按本地开始时间保存到 `benchmark/`，文件名形如 `20260902-123456-789.json`，可通过 `BENCHMARK_PATH` 改目录。JSON 中保留 `moves` 和 `final_fen` 供排障；前端卡片不显示完整着法串。
-
-运行中 benchmark 前端每 5 秒刷新一次；无运行中任务时不轮询。列表按开始时间倒序，最新任务在上。
+Benchmark 结果按本地开始时间保存到 `benchmark/`，文件名形如 `20260902-123456-789.json`，可通过 `BENCHMARK_PATH` 改目录。每盘以 `initial_fen` 和 `snapshots` 保存为存档结构；不保存 `moves` 或 `final_fen`。暂停任务会保留中断盘 snapshots，恢复时从最后一个 snapshot 还原该盘并继续。进程重启后，已加载但未完成且未失败的任务可以恢复。
 
 ## 已废弃的方向
 
