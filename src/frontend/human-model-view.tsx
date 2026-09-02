@@ -1,7 +1,7 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import type { Key } from 'xiangqiground/types'
 import { request } from './api'
-import { changedMove, gameWithPreviewMove, resultText, statusFor, toIccs, toKey } from './game-utils'
+import { changedMove, gameWithPreviewMove, resultText, toIccs, toKey } from './game-utils'
 import { MoveRecord } from './move-record'
 import { XiangqiBoard } from './xiangqi-board'
 import type { Game, ModelOption, Side } from './types'
@@ -282,7 +282,6 @@ export function HumanModelView({ active, models, modelsLoaded }: HumanModelViewP
         </aside>
         <MoveRecord
           snapshots={snapshots}
-          status={statusFor(game, modelsLoaded, modelThinking)}
           error={error}
           archiveMode="human-model"
           archiveHumanSide={game?.human_side ?? humanSide}

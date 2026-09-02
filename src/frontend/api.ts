@@ -5,6 +5,7 @@ export async function request<T>(url: string, init?: RequestInit): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     ...init,
   })
+  if (response.status === 204) return undefined as T
   const payload = (await response.json()) as T & { error?: string }
   if (!response.ok) {
     throw new Error(payload.error ?? '请求失败')

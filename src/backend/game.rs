@@ -1,22 +1,7 @@
+use crate::openings::MAINSTREAM_OPENINGS;
 use crate::position::Position;
 use crate::rules::RuleState;
 use uuid::Uuid;
-
-const MAINSTREAM_OPENING_MOVES: &[((u8, u8), u32)] = &[
-    ((19, 22), 24), // B2-E2, central cannon
-    ((25, 22), 24), // H2-E2, central cannon
-    ((19, 23), 6),  // B2-F2
-    ((25, 21), 6),  // H2-D2
-    ((19, 21), 5),  // B2-D2
-    ((25, 23), 5),  // H2-F2
-    ((1, 20), 8),   // B0-C2, horse
-    ((7, 24), 8),   // H0-G2, horse
-    ((2, 22), 4),   // C0-E2, elephant
-    ((6, 22), 4),   // G0-E2, elephant
-    ((31, 40), 6),  // E3-E4, central pawn
-    ((30, 39), 2),  // C3-C4
-    ((34, 43), 2),  // G3-G4
-];
 
 pub struct Game {
     position: Position,
@@ -79,6 +64,17 @@ impl Game {
         &self.moves
     }
 
+    pub fn iccs_moves(&self) -> Vec<String> {
+        self.moves
+            .iter()
+            .map(|&(start, end)| format_move(start, end))
+            .collect()
+    }
+
+    pub fn repetition_cycle_plies(&self) -> Option<(usize, usize)> {
+        self.rules.repetition_cycle_plies()
+    }
+
     pub fn is_finished(&self) -> bool {
         self.result().is_some()
     }
@@ -87,7 +83,6 @@ impl Game {
         &self,
         model_path: &str,
         simulations: usize,
-        _batch_size: usize,
         max_depth: usize,
     ) -> Result<crate::mcts::MctsSearchResult, String> {
         let batch_size = std::env::var("MCTS_BATCH_SIZE")
@@ -95,11 +90,17 @@ impl Game {
             .and_then(|value| value.parse().ok())
             .filter(|&value: &usize| value > 0)
             .unwrap_or(8);
+        let exploration = std::env::var("MCTS_EXPLORATION")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .filter(|value: &f32| value.is_finite() && *value > 0.0)
+            .unwrap_or(1.25);
         crate::mcts::search_onnx(
-            &self.fen(),
+            self.position,
+            self.rules.clone(),
             model_path,
             simulations,
-            1.25,
+            exploration,
             batch_size,
             max_depth,
         )
@@ -110,27 +111,26 @@ impl Game {
             return None;
         }
         let legal = self.position.legal().ok()?;
-        let legal_openings: Vec<_> = MAINSTREAM_OPENING_MOVES
+        let legal_openings: Vec<_> = MAINSTREAM_OPENINGS
             .iter()
-            .copied()
-            .filter(|&((start, end), _)| legal.contains(&(start as usize, end as usize)))
+            .filter(|opening| legal.contains(&(opening.movement.0 as usize, opening.movement.1 as usize)))
             .collect();
         if legal_openings.is_empty() {
             return None;
         }
-        let total_weight: u32 = legal_openings.iter().map(|&(_, weight)| weight).sum();
+        let total_weight: u32 = legal_openings.iter().map(|opening| opening.weight).sum();
         let mut choice = u32::from_le_bytes(
             Uuid::new_v4().as_bytes()[..4]
                 .try_into()
                 .expect("UUID has 16 bytes"),
         ) % total_weight;
-        for &((start, end), weight) in &legal_openings {
-            if choice < weight {
-                return Some((start, end));
+        for opening in &legal_openings {
+            if choice < opening.weight {
+                return Some(opening.movement);
             }
-            choice -= weight;
+            choice -= opening.weight;
         }
-        legal_openings.last().map(|&((start, end), _)| (start, end))
+        legal_openings.last().map(|opening| opening.movement)
     }
 
     pub fn policy_search(
@@ -140,7 +140,11 @@ impl Game {
         if self.result().is_some() {
             return Err("game already finished".into());
         }
-        let result = crate::mcts::policy_search_onnx(&self.fen(), model_path)?;
+        let result = crate::mcts::policy_search_onnx_from_state(
+            self.position,
+            self.rules.clone(),
+            model_path,
+        )?;
         if !self
             .position
             .legal()?
@@ -162,6 +166,20 @@ impl Game {
                 .map(|(start, end)| (start as u8, end as u8))
                 .collect()
         })
+    }
+
+    pub fn model_legal_moves(&self) -> Result<Vec<(u8, u8)>, String> {
+        let legal = self.position.legal()?;
+        let mut non_repeating = Vec::new();
+        let mut all = Vec::with_capacity(legal.len());
+        for (start, end) in legal {
+            let movement = (start as u8, end as u8);
+            if !self.rules.move_repeats_position(&self.position, start, end)? {
+                non_repeating.push(movement);
+            }
+            all.push(movement);
+        }
+        Ok(if non_repeating.is_empty() { all } else { non_repeating })
     }
 
     pub fn apply(&mut self, start: u8, end: u8) -> Result<(), String> {
@@ -195,6 +213,16 @@ impl Game {
     fn result(&self) -> Option<&'static str> {
         self.rules.result(&self.position)
     }
+}
+
+fn format_move(start: u8, end: u8) -> String {
+    format!(
+        "{}{}-{}{}",
+        (b'A' + start % 9) as char,
+        start / 9,
+        (b'A' + end % 9) as char,
+        end / 9,
+    )
 }
 
 #[cfg(test)]
@@ -247,12 +275,24 @@ mod tests {
     }
 
     #[test]
+    fn model_legal_moves_prefer_moves_that_do_not_repeat_positions() {
+        let mut game = Game::new("4k4/3r5/9/9/4p4/9/9/9/3R5/4K4 w - - 0 1").unwrap();
+        game.apply(12, 11).unwrap();
+        game.apply(75, 74).unwrap();
+        game.apply(11, 12).unwrap();
+        game.apply(74, 75).unwrap();
+
+        assert!(game.legal_moves().unwrap().contains(&(12, 11)));
+        assert!(!game.model_legal_moves().unwrap().contains(&(12, 11)));
+    }
+
+    #[test]
     fn opening_book_only_applies_to_the_red_first_move() {
         let mut game = Game::new(START_FEN).unwrap();
         assert!(game.opening_book_move().is_some_and(|movement| {
-            MAINSTREAM_OPENING_MOVES
+            MAINSTREAM_OPENINGS
                 .iter()
-                .any(|&((start, end), _)| (start, end) == movement)
+                .any(|opening| opening.movement == movement)
         }));
 
         game.apply(19, 22).unwrap();
@@ -271,4 +311,5 @@ mod tests {
                 .unwrap();
         assert_eq!(game.opening_book_move(), None);
     }
+
 }

@@ -8,6 +8,6 @@
 uv run python scripts/export_onnx.py checkpoints\pikafish-g4096-m2048\best.pt models\resnet-c192-b12-pikafish.onnx
 ```
 
-重启服务后请求 `GET /api/models`，或运行 `scripts/benchmark_models.py --games 2`，可验证该 checkpoint 已被发现并可走子。
+重启服务后请求 `GET /api/models`，或在 Web 界面选择该模型走一手，可验证该 ONNX 已被发现并可推理。
 
 Pikafish NNUE 引擎本身不放在本目录，也不作为模型文件加载。Web 服务通过进程环境变量 `PIKAFISH_PATH` 和可选的 `PIKAFISH_NNUE_PATH` 配置它。

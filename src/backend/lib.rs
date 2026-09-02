@@ -1,5 +1,6 @@
 pub mod game;
 pub mod mcts;
+pub mod openings;
 pub(crate) mod position;
 pub(crate) mod rules;
 

@@ -56,6 +56,9 @@ pub struct GameResponse {
 #[derive(Clone)]
 pub struct AppState {
     pub games: Arc<RwLock<HashMap<Uuid, Session>>>,
+    pub benchmarks: crate::benchmark::Benchmarks,
+    pub benchmark_controls: crate::benchmark::Controls,
+    pub benchmark_path: std::path::PathBuf,
 }
 
 pub struct Session {
@@ -108,6 +111,11 @@ impl Session {
                         .and_then(|value| value.parse::<usize>().ok())
                         .filter(|&value| value > 0)
                         .unwrap_or(8),
+                    "effective_exploration": std::env::var("MCTS_EXPLORATION")
+                        .ok()
+                        .and_then(|value| value.parse::<f32>().ok())
+                        .filter(|value| value.is_finite() && *value > 0.0)
+                        .unwrap_or(1.25),
                     "effective_max_depth": 256,
                     "root_network_value": result.root_network_value,
                     "root_children": result.root_children.into_iter().map(|(start, end, visits, q, prior)| json!({
@@ -366,13 +374,13 @@ pub struct ApiError {
     message: String,
 }
 impl ApiError {
-    fn bad_request(message: impl ToString) -> Self {
+    pub(crate) fn bad_request(message: impl ToString) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.to_string(),
         }
     }
-    fn not_found() -> Self {
+    pub(crate) fn not_found() -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             message: "game not found".to_owned(),

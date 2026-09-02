@@ -3,7 +3,6 @@ const COLS: i32 = 9;
 const BOARD_SIZE: usize = 90;
 const TYPE_COUNT: usize = 8;
 
-use std::collections::HashSet;
 #[derive(Clone, Copy)]
 pub struct Position {
     pub board: [u8; BOARD_SIZE],
@@ -158,10 +157,11 @@ impl Position {
         )
     }
 
-    pub(crate) fn repetition_key(&self) -> String {
-        let fen = self.fen();
-        let mut fields = fen.split_whitespace();
-        format!("{} {}", fields.next().unwrap(), fields.next().unwrap())
+    pub(crate) fn repetition_key(&self) -> [u8; BOARD_SIZE + 1] {
+        let mut key = [0; BOARD_SIZE + 1];
+        key[..BOARD_SIZE].copy_from_slice(&self.board);
+        key[BOARD_SIZE] = u8::from(self.red_to_move);
+        key
     }
 
     pub(crate) fn pseudo(&self, start: usize) -> Vec<usize> {
@@ -275,65 +275,6 @@ impl Position {
             _ => {}
         };
         moves
-    }
-
-    pub(crate) fn chase_targets(&self, red: bool) -> HashSet<(u8, u8)> {
-        let mut targets = HashSet::new();
-        let mut attack_position = *self;
-        attack_position.red_to_move = red;
-        let mut attackers = attack_position.by_color[usize::from(!red)];
-        while attackers != 0 {
-            let start = attackers.trailing_zeros() as usize;
-            attackers &= attackers - 1;
-            let piece = attack_position.board[start].to_ascii_uppercase();
-            if matches!(piece, b'K' | b'P') {
-                continue;
-            }
-            for end in attack_position.pseudo(start) {
-                let target = attack_position.board[end];
-                if target == b' '
-                    || target.is_ascii_uppercase() == red
-                    || target.to_ascii_uppercase() == b'K'
-                {
-                    continue;
-                }
-                let Ok(after_attack) = attack_position.apply(start, end) else {
-                    continue;
-                };
-                if after_attack.in_check(red).unwrap_or(true) {
-                    continue;
-                }
-                let can_recapture = after_attack
-                    .legal()
-                    .map(|moves| moves.iter().any(|&(_, destination)| destination == end))
-                    .unwrap_or(true);
-                let attacker_kind = piece;
-                let target_kind = target.to_ascii_uppercase();
-                let strong_chase = matches!(
-                    (attacker_kind, target_kind),
-                    (b'N' | b'C', b'R') | (b'A' | b'B', b'R' | b'C' | b'N')
-                );
-                let mutual_attack =
-                    attacker_kind == target_kind && Self::can_attack_square(self, !red, end, start);
-                if strong_chase || (!can_recapture && !mutual_attack) {
-                    targets.insert((end as u8, target.to_ascii_uppercase()));
-                }
-            }
-        }
-        targets
-    }
-
-    fn can_attack_square(&self, red: bool, start: usize, end: usize) -> bool {
-        if start >= BOARD_SIZE || end >= BOARD_SIZE {
-            return false;
-        }
-        let mut position = *self;
-        position.red_to_move = red;
-        position.pseudo(start).contains(&end)
-            && position
-                .apply(start, end)
-                .map(|next| !next.in_check(red).unwrap_or(true))
-                .unwrap_or(false)
     }
 
     fn put(&mut self, square: usize, piece: u8) {

@@ -1,7 +1,7 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import type { Key } from 'xiangqiground/types'
 import { request } from './api'
-import { changedMove, gameWithPreviewMove, resultText, statusFor, toKey } from './game-utils'
+import { changedMove, gameWithPreviewMove, resultText, toKey } from './game-utils'
 import { MoveRecord } from './move-record'
 import { XiangqiBoard } from './xiangqi-board'
 import type { Game, ModelOption } from './types'
@@ -201,7 +201,6 @@ export function ModelMatchView({ active, models, modelsLoaded }: ModelMatchViewP
         </aside>
         <MoveRecord
           snapshots={snapshots}
-          status={statusFor(game, modelsLoaded, thinking)}
           error={error}
           archiveMode="model-model"
           archiveHumanSide={null}

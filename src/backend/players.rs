@@ -50,7 +50,7 @@ impl Player {
                 })
             }
             Self::Onnx { model_path } => {
-                let result = game.search(model_path, simulations, 8, 256)?;
+                let result = game.search(model_path, simulations, 256)?;
                 Ok(PlayerMove {
                     movement: result.movement,
                     mcts_debug: Some(result),
@@ -58,7 +58,7 @@ impl Player {
                 })
             }
             Self::Pikafish(player) => Ok(PlayerMove {
-                movement: player.choose_move(game)?,
+                movement: player.choose_move(game, &game.model_legal_moves()?)?,
                 mcts_debug: None,
                 policy_debug: None,
             }),
@@ -81,7 +81,10 @@ impl PikafishPlayer {
         })
     }
 
-    fn choose_move(&mut self, game: &Game) -> Result<(u8, u8), String> {
+    fn choose_move(&mut self, game: &Game, legal_moves: &[(u8, u8)]) -> Result<(u8, u8), String> {
+        if legal_moves.is_empty() {
+            return Err("position has no moves legal under game rules".into());
+        }
         self.start()?;
         let stdin = self
             .stdin
@@ -89,7 +92,12 @@ impl PikafishPlayer {
             .ok_or_else(|| "Pikafish stdin is unavailable".to_owned())?;
         writeln!(stdin, "position fen {}", game.fen())
             .map_err(|error| format!("failed to send Pikafish position: {error}"))?;
-        writeln!(stdin, "go movetime {}", self.move_time_ms)
+        let search_moves = legal_moves
+            .iter()
+            .map(|&(start, end)| format_uci_move(start, end))
+            .collect::<Vec<_>>()
+            .join(" ");
+        writeln!(stdin, "go movetime {} searchmoves {search_moves}", self.move_time_ms)
             .map_err(|error| format!("failed to send Pikafish search: {error}"))?;
         stdin
             .flush()
@@ -99,8 +107,12 @@ impl PikafishPlayer {
             .split_whitespace()
             .nth(1)
             .ok_or_else(|| "Pikafish returned no move".to_owned())?;
-        xiangqi::parse_iccs_move(bestmove)
-            .ok_or_else(|| format!("invalid Pikafish move: {bestmove}"))
+        let movement = xiangqi::parse_iccs_move(bestmove)
+            .ok_or_else(|| format!("invalid Pikafish move: {bestmove}"))?;
+        if !legal_moves.contains(&movement) {
+            return Err(format!("Pikafish returned a move outside allowed anti-cycle moves: {bestmove}"));
+        }
+        Ok(movement)
     }
 
     fn start(&mut self) -> Result<(), String> {
@@ -196,4 +208,14 @@ fn wait_for_line<R: BufRead>(lines: &mut Lines<R>, expected: &str) -> Result<Str
             return Ok(line);
         }
     }
+}
+
+fn format_uci_move(start: u8, end: u8) -> String {
+    format!(
+        "{}{}{}{}",
+        (b'a' + start % 9) as char,
+        start / 9,
+        (b'a' + end % 9) as char,
+        end / 9,
+    )
 }

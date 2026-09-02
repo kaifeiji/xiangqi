@@ -4,7 +4,6 @@ import type { CompactArchiveSnapshot, Game, GameArchive, GameMode, Side } from '
 
 interface MoveRecordProps {
   snapshots: Game[]
-  status: string
   error: string
   archiveMode?: GameMode
   archiveHumanSide?: Side | null
@@ -15,7 +14,7 @@ interface MoveRecordProps {
   keyboardNavigationEnabled?: boolean
 }
 
-export function MoveRecord({ snapshots, status, error, archiveMode, archiveHumanSide, currentIndex, onNavigate, onPreviewMove, previewMove, keyboardNavigationEnabled = false }: MoveRecordProps): React.JSX.Element {
+export function MoveRecord({ snapshots, error, archiveMode, archiveHumanSide, currentIndex, onNavigate, onPreviewMove, previewMove, keyboardNavigationEnabled = false }: MoveRecordProps): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<'record' | 'analysis'>('record')
   const moves = snapshots.map((snapshot, index) => {
     if (index === 0) return { id: `${snapshot.game_id}-${snapshot.turn}`, number: 0, snapshotIndex: 0, text: '初始局面' }
@@ -38,11 +37,15 @@ export function MoveRecord({ snapshots, status, error, archiveMode, archiveHuman
   const currentSnapshot = snapshots[currentPly]
   const mctsDebug = currentSnapshot?.mcts_debug ?? null
   const policyDebug = currentSnapshot?.policy_debug ?? null
-  const fallbackAnalysisSide = snapshots[currentPly - 1]?.side_to_move ?? currentSnapshot?.side_to_move
-  const analysisSideCode = mctsDebug?.searched_side ?? policyDebug?.searched_side ?? fallbackAnalysisSide
-  const analysisSide = analysisSideCode === 'w' ? '红方' : '黑方'
+  const sideToMoveCode = currentSnapshot?.side_to_move
+  const analysisSideCode = mctsDebug?.searched_side ?? policyDebug?.searched_side ?? sideToMoveCode
   const value = mctsDebug?.root_network_value ?? policyDebug?.network_value ?? null
-  const advantage = value === null ? '暂无评估' : Math.abs(value) < 0.05 ? '局面均势' : value > 0 ? `${analysisSide}优势` : `${analysisSide === '红方' ? '黑方' : '红方'}优势`
+  const sideValue = value !== null && analysisSideCode && sideToMoveCode && analysisSideCode !== sideToMoveCode ? -value : value
+  const sideLabel = sideToMoveCode === 'w' ? '红' : sideToMoveCode === 'b' ? '黑' : '?'
+  const sideState = sideValue === null ? '无评估' : Math.abs(sideValue) < 0.05 ? '均' : sideValue > 0 ? '优' : '劣'
+  const toolbarValueParts = currentSnapshot ? [sideLabel, ...(sideValue === null ? [] : [sideState, sideValue.toFixed(3)])] : []
+  const toolbarValueText = toolbarValueParts.join(' | ')
+  const valueClassName = sideValue === null || Math.abs(sideValue) < 0.05 ? 'value-neutral' : sideValue > 0 ? 'value-positive' : 'value-negative'
 
   const navigateWithKeyboard = useEffectEvent((event: KeyboardEvent): void => {
     if (!keyboardNavigationEnabled || !replayEnabled || !onNavigate) return
@@ -80,18 +83,17 @@ export function MoveRecord({ snapshots, status, error, archiveMode, archiveHuman
           <button type="button" role="tab" aria-selected={activeTab === 'record'} onClick={() => setActiveTab('record')}>行棋记录</button>
           <button type="button" role="tab" aria-selected={activeTab === 'analysis'} onClick={() => setActiveTab('analysis')}>着法分析</button>
         </div>
-        {canSaveArchive && <button className="icon-button" type="button" aria-label="保存存档" title="保存存档" onClick={saveArchive}>&#8595;</button>}
+        <div className="record-toolbar-actions">
+          {toolbarValueText && <strong className={`toolbar-value ${valueClassName}`} title="当前局面 Root value">{toolbarValueText}</strong>}
+          {replayEnabled && <>
+            <button className="icon-button" type="button" aria-label="上一步" title="上一步" onClick={() => onNavigate(currentPly - 1)} disabled={currentPly <= 0}>&#8592;</button>
+            <span className="toolbar-ply">{currentPly} / {maxPly}</span>
+            <button className="icon-button" type="button" aria-label="下一步" title="下一步" onClick={() => onNavigate(currentPly + 1)} disabled={currentPly >= maxPly}>&#8594;</button>
+          </>}
+        </div>
       </div>
       <div className="record-pane" role="tabpanel" aria-label="行棋" hidden={activeTab !== 'record'}>
-        <header className="record-header">
-          <div><p className="status" role="status">{status}</p></div>
-        </header>
         {error && <p className="error" role="alert">{error}</p>}
-        {replayEnabled && <div className="record-controls">
-          <button type="button" onClick={() => onNavigate(currentPly - 1)} disabled={currentPly <= 0}>上一步</button>
-          <span>{currentPly} / {maxPly}</span>
-          <button type="button" onClick={() => onNavigate(currentPly + 1)} disabled={currentPly >= maxPly}>下一步</button>
-        </div>}
         <ol className="move-list">
           {moves.map((move) => {
             const isActive = currentPly === move.snapshotIndex
@@ -102,14 +104,10 @@ export function MoveRecord({ snapshots, status, error, archiveMode, archiveHuman
             </li>
           })}
         </ol>
+        {canSaveArchive && <button className="icon-button record-save-button" type="button" aria-label="保存存档" title="保存存档" onClick={saveArchive}>&#8595;</button>}
       </div>
       <div className="analysis-panel" role="tabpanel" aria-label="着法" hidden={activeTab !== 'analysis'}>
         {!mctsDebug && !policyDebug ? <p className="analysis-empty">该局面没有模型分析数据</p> : <>
-          <div className="analysis-summary">
-            <div><span className="analysis-label">分析方</span><strong>{analysisSide}</strong></div>
-            <div><span className="analysis-label">局面判断</span><strong>{advantage}</strong></div>
-            <div><span className="analysis-label">Root value</span><strong className={value !== null && value >= 0 ? 'value-positive' : 'value-negative'}>{value === null ? '--' : value.toFixed(3)}</strong></div>
-          </div>
           {mctsDebug && <dl className="analysis-stats">
             <div><dt>模拟次数</dt><dd>{mctsDebug.simulations}</dd></div>
             <div><dt>平均叶深</dt><dd>{mctsDebug.average_leaf_depth.toFixed(1)}</dd></div>

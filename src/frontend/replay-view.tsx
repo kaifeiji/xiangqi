@@ -104,7 +104,6 @@ export function ReplayView({ active }: ReplayViewProps): React.JSX.Element {
         </aside>
         <MoveRecord
           snapshots={snapshots}
-          status={snapshots.length ? '回放中' : '请选择存档'}
           error={error}
           currentIndex={position}
           onNavigate={navigateReplay}

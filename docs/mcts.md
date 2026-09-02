@@ -28,11 +28,13 @@
 
 ## P3：历史规则
 
-重复局面、自然限着和总 ply 必须进入搜索上下文；同一棋盘配不同历史不是同一搜索状态。长将、长捉需要额外保存循环历史。
+重复局面、自然限着和总 ply 必须进入搜索上下文；同一棋盘配不同历史不是同一搜索状态。当前实现不做复杂长将/长捉归责，而是用模型选着阶段的反循环过滤降低死循环概率。
 
 ### P3a 结果
 
-已默认接入模型玩家，不新增 Web 或命令行参数。MCTS 自动接收 `position_counts`、`quiet_plies` 和总 ply，支持理论和棋、三次重复、120 ply 自然限着和 600 ply 最大局长；静着递增，吃子或过河兵重置。长将、长捉精确判罚仍属于后续 P3b。
+已默认接入模型玩家，不新增 Web 或命令行参数。MCTS 自动接收规则历史，支持理论和棋、三次重复、120 ply 自然限着和 600 ply 最大局长。
+
+模型方使用简化反循环策略：若某局面存在不会回到历史局面的合法着法，则 MCTS/policy/Pikafish 只在非重复着法中选择；只有全部合法着法都会重复时才允许重复。三次重复统一作为和棋终局兜底。
 
 ## P4：转置表和局面缓存
 
@@ -40,7 +42,7 @@
 
 ### P4 结果
 
-尚未实现完整转置表。当前优先保留 P2 root 复用，待 P3b 稳定后再实现带历史上下文的 policy/value 缓存，避免错误合并不同规则状态。
+尚未实现完整转置表。当前优先保留 P2 root 复用；若实现 policy/value 缓存，key 必须包含足够历史摘要，避免错误合并不同规则状态。
 
 ## P5：搜索预算
 
@@ -68,7 +70,7 @@ P6c 目前只有按根节点复杂度选择的静态 profile，尚未加入随 v
 
 ### P7 结果
 
-暂不实施。当前优先级是 P3b 长将/长捉规则、固定算力下的 `c_puct` 对战实验，以及带历史上下文的 policy/value 缓存。
+暂不实施。当前优先级是固定算力下的 `c_puct` 对战实验，以及带历史上下文的 policy/value 缓存。
 
 ## 当前深度/广度策略
 
@@ -76,14 +78,77 @@ P6c 目前只有按根节点复杂度选择的静态 profile，尚未加入随 v
 
 建议用固定 `128/512 simulations`，比较 `exploration=0.75/1.0/1.25/1.5/2.0`，同时记录叶深度、活跃根分支数、访问集中度、固定局面落子和对战胜率。正式对弈保持 `root_temperature=0`；Dirichlet noise 和温度仅在未来自博弈模式中单独开启。
 
+## 近期实测记录（2026-09-02）
+
+### 批量选择与真实 simulation 计数
+
+`batch=32` 时已修复同一未展开叶在一个 batch 内被重复选择并多次回传的问题。重复叶选择会释放 virtual loss，不再计入有效 simulation。修复后 `1000 simulations` 表示 `1000` 个真实 NN 叶评估；此前约 `3s/1000 sims` 的结果包含重复叶回传，不能作为等价基准。
+
+典型日志口径：
+
+```text
+simulations=1000
+batch=32
+inference_batches=33
+evaluated_leaves=1000
+average_onnx_batch=30.30
+duplicate_leaf_selections=0
+```
+
+这说明 batch 已基本满载，selection 也不是主要瓶颈。
+
+### c64 与 c192 推理成本差异
+
+不同模型大小不能横向比较延迟。已观测：
+
+```text
+c64-b4-current-mirror.onnx / 1000 sims / batch=32
+total=2.458s
+onnx_primary=0.212s
+
+c192-b12 / 1000 sims / batch=32
+total=5.932s
+onnx_primary=4.403s
+selection=0.003s
+CPU 扩展等约 1.529s
+```
+
+`onnx_primary` 是端到端评估时间，包含输入编码、ORT tensor、CPU/GPU 传输、`session.run()`、输出读取和合法着 softmax，不等于纯 GPU kernel 时间。对上述 c192 记录，平均每个 ONNX batch 约 `133ms`，每个叶局面端到端约 `4.4ms`。
+
+### 深度解释
+
+`average_leaf_depth=3.5`、`max_leaf_depth=5` 表示大多数 NN value 评估发生在根后约 3 到 4 个半回合，是偏浅的 policy-guided MCTS。后期出现 `max_leaf_depth=16` 是健康信号：说明访问逐渐集中后，主变能继续向下扩展；但单个最大值不能代表整体搜索深度。
+
+后续分析应记录 depth 分位数，而不只看平均和最大：`P50/P90/P99/max` 比 `average/max` 更能区分“整体浅”与“少数主变深入”。
+
+### FP16 与 TensorRT 取舍
+
+当前生产路径保留 FP32 ONNX + CUDA EP，CUDA 不可用时回退 CPU。FP16 实验已移除：不保留 FP16 ONNX、`MCTS_ONNX_PRECISION` 或 `half` 依赖，避免可见数值误差影响棋力判断。
+
+TensorRT 仍是可能的性能方向，但不是当前默认依赖。以 c192 基线估算：
+
+```text
+总耗时        5.895s
+ONNX CUDA EP  4.163s
+其余 CPU      1.732s
+```
+
+TensorRT 只能压缩 ONNX 这部分；若 TensorRT FP16 获得 `2x` ONNX 加速，总时延约 `3.8s`。要进入 `3s`，需要 ONNX 约 `3.3x` 加速，或同时把 CPU 扩展从约 `1.7s` 优化到约 `1s`。
+
+### 仍值得优化的方向
+
+1. `RuleState::child()` 与候选展开的历史状态复制。历史越深，复制越贵；可考虑父指针或共享不可变历史。
+2. 输入 buffer 与输出解析复用，减少每个 batch 的分配和 logits 后处理成本。
+3. 带历史摘要的 policy/value 缓存或转置表，但不能只用棋盘 key。
+4. 固定算力下的 `c_puct` 对战实验；不要无验证地加入 Top-p、Early Stopping 或多线程队列。
+
 ## 总体状态
 
 ```text
 P0  可测量性        已完成
 P1  批量推理        已完成，默认 batch=8
 P2  树复用          已完成
-P3a 基础历史规则    已完成，默认启用
-P3b 长将/长捉       未完成
+P3  基础历史规则/反循环 已完成，默认启用
 P4  转置表/缓存     未完成
 P5  搜索预算        已完成
 P6a prior 校验      已完成

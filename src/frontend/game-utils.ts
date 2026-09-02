@@ -18,15 +18,6 @@ export function resultText(result: string): string {
   return texts[result] ?? '对局结束'
 }
 
-export function statusFor(game: Game | undefined, modelsLoaded: boolean, thinking: boolean): string {
-  if (!modelsLoaded) return '加载模型中...'
-  if (!game) return '未开始'
-  if (game.result) return `对局结束：${resultText(game.result)}`
-  if (thinking) return '模型思考中...'
-  const side = game.side_to_move === 'w' ? '红方' : '黑方'
-  return `第 ${game.turn} 回合，轮到${side}${game.in_check ? '（被将军）' : ''}`
-}
-
 export function toKey(square: string): Key {
   const file = square.slice(0, 1).toLowerCase()
   const rank = Number(square.slice(1))

@@ -1,5 +1,5 @@
 export type GameMode = 'human-model' | 'model-model'
-export type Mode = GameMode | 'replay'
+export type Mode = GameMode | 'replay' | 'benchmark'
 export type Side = 'w' | 'b'
 
 export interface BoardCell {
@@ -31,6 +31,7 @@ export interface MctsDebug {
   average_leaf_depth: number
   max_leaf_depth: number
   effective_batch_size?: number
+  effective_exploration?: number
   effective_max_depth?: number
   root_network_value?: number | null
   legal_cache_hits?: number
@@ -50,6 +51,36 @@ export interface PolicyDebug {
 export interface ModelOption {
   id: string
   name: string
+}
+
+export interface BenchmarkGame {
+  number: number
+  opening_move: string
+  started_at_ms: number
+  finished_at_ms: number
+  result: string | null
+  total_plies: number
+  rule60: number
+  elapsed_ms: number
+  error: string | null
+  moves: string[]
+  final_fen: string
+  repetition_cycle_plies: [number, number] | null
+}
+
+export interface Benchmark {
+  id: string
+  first_model: string
+  second_model: string
+  mcts_simulations: number
+  games_requested: number
+  started_at_ms: number
+  finished_at_ms: number | null
+  status: 'running' | 'completed' | 'cancelled' | 'failed'
+  first_wins: number
+  second_wins: number
+  draws: number
+  games: BenchmarkGame[]
 }
 
 export interface GameArchive {

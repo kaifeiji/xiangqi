@@ -15,3 +15,5 @@ target/
 !/checkpoints/README.md
 /models/**
 !/models/README.md
+/benchmark/**
+!/benchmark/README.md

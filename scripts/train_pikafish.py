@@ -520,14 +520,13 @@ def main() -> int:
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, learning_rate_scale)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    log_file = (args.checkpoint_dir / "training.jsonl").open("a", encoding="utf-8")
     metrics_file = (args.checkpoint_dir / "metrics.jsonl").open("a", encoding="utf-8")
     progress_log_file = (args.checkpoint_dir / "progress.jsonl").open("a", encoding="utf-8")
 
     def emit_log(payload: dict[str, object], *, target: Any = None) -> None:
         message = json.dumps(payload, ensure_ascii=False)
         print(message, flush=True)
-        output = log_file if target is None else target
+        output = progress_log_file if target is None else target
         output.write(f"{message}\n")
         output.flush()
 
@@ -760,7 +759,6 @@ def main() -> int:
             start_batch_index = 0
             start_epoch_update_step = 0
     finally:
-        log_file.close()
         metrics_file.close()
         progress_log_file.close()
     return 0

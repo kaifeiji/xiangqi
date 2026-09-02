@@ -3,6 +3,7 @@ use std::{net::SocketAddr, path::PathBuf};
 use tower_http::{cors::CorsLayer, services::ServeDir};
 
 mod api;
+mod benchmark;
 mod models;
 mod players;
 mod session;
@@ -39,8 +40,14 @@ async fn main() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(8000);
     let dist = PathBuf::from("dist");
+    let benchmark_path = std::env::var("BENCHMARK_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("benchmark"));
     let state = AppState {
         games: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        benchmarks: std::sync::Arc::new(tokio::sync::RwLock::new(benchmark::load(&benchmark_path))),
+        benchmark_controls: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        benchmark_path,
     };
     let app = api::router(state)
         .route("/health", get(|| async { "ok" }))
