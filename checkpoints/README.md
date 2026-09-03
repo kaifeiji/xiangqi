@@ -4,7 +4,9 @@
 
 训练输出通常包括：
 
-- `best.pt`：validation 指标最佳的 checkpoint。
+- `best-epoch-xxxx.pt`：最低 `validation_j_select` 的 checkpoint。
+- `best-policy-epoch-xxxx.pt`：最低 `cp_policy_kl` 的 checkpoint。
+- `best-value-epoch-xxxx.pt`：最低 `value_cp_mae_le_300` 的 checkpoint。
 - `last.pt`：最近一次保存的 checkpoint，可用于中断后恢复。
 - `metrics.jsonl`：`train.py` 的逐 epoch/step 训练、验证和测试指标记录。
 - `progress.jsonl`：`train_pikafish.py` 的追加事件流，包含启动配置、恢复游标、进度吞吐、训练指标、CUDA 显存和 early-stop 状态；`train_progress` 事件使用平铺训练指标字段。

@@ -228,6 +228,9 @@ def compute_losses(
         per_sample_policy[rows] = -log_probs[rows, actions[rows, 0].clamp_min(0)]
     weights = torch.where(mate_rows, 4.0, 1.0).to(policy_logits.device) * policy_valid
     policy_loss = (per_sample_policy * weights).sum() / weights.sum().clamp_min(1)
+    zero_policy_loss = per_sample_policy.sum() * 0
+    policy_cp_loss = per_sample_policy[cp_rows].mean() if cp_rows.any() else zero_policy_loss
+    policy_mate_loss = per_sample_policy[mate_rows].mean() if mate_rows.any() else zero_policy_loss
 
     teacher_scores = batch["teacher_scores"].to(value_predictions.dtype)
     is_cp = batch["teacher_score_kinds"] == CP_SCORE_KIND
@@ -246,17 +249,28 @@ def compute_losses(
         (value_errors * value_weights * value_valid).sum() / (value_weights * value_valid).sum().clamp_min(1)
         if value_valid.any() else value_errors.sum() * 0
     )
+    value_cp_rows = is_cp & finite_scores
+    zero_value_loss = value_errors.sum() * 0
+    value_cp_loss = value_errors[value_cp_rows].mean() if value_cp_rows.any() else zero_value_loss
+    value_mate_loss = value_errors[mate_valid].mean() if mate_valid.any() else zero_value_loss
     cp_policy_rows = cp_rows
     cp_policy_count = cp_policy_rows.sum()
     return {
         "policy_loss": policy_loss,
+        "policy_cp_loss": policy_cp_loss,
+        "policy_mate_loss": policy_mate_loss,
         "value_loss": value_loss,
+        "value_cp_loss": value_cp_loss,
+        "value_mate_loss": value_mate_loss,
         "policy_valid": policy_valid,
         "value_valid": value_valid,
         "value_mate": mate_valid,
         "mate_policy": mate_rows,
         "cp_policy_kl": per_sample_cp_kl[cp_policy_rows].mean() if cp_policy_count else per_sample_cp_kl.sum() * 0,
         "cp_policy_count": cp_policy_count,
+        "mate_policy_count": mate_rows.sum(),
+        "value_cp_count": value_cp_rows.sum(),
+        "value_mate_count": mate_valid.sum(),
     }
 
 
@@ -332,9 +346,11 @@ def evaluate(
     model.eval()
     totals = {"joint_loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0}
     policy_valid = value_valid = mate_policy = value_mate = samples = cp_policy_samples = 0
-    cp_mae_total = cp_mae_all_total = cp_mae_gt_300_total = 0.0
-    cp_mae_samples = cp_mae_all_samples = cp_mae_gt_300_samples = 0
-    sign_correct = sign_samples = sign_gt_300_correct = sign_gt_300_samples = 0
+    policy_cp_loss_total = policy_mate_loss_total = value_cp_loss_total = value_mate_loss_total = 0.0
+    policy_mate_samples = value_cp_samples = value_mate_samples = 0
+    cp_mae_total = cp_mae_le_100_total = cp_mae_all_total = cp_mae_gt_300_total = 0.0
+    cp_mae_samples = cp_mae_le_100_samples = cp_mae_all_samples = cp_mae_gt_300_samples = 0
+    sign_correct = sign_samples = sign_le_100_correct = sign_le_100_samples = sign_gt_300_correct = sign_gt_300_samples = 0
     value_target_mae_total = value_target_mae_samples = 0.0
     cp_policy_kl_total = 0.0
     with torch.no_grad():
@@ -358,6 +374,16 @@ def evaluate(
             cp_policy_count = int(losses["cp_policy_count"])
             cp_policy_kl_total += float(losses["cp_policy_kl"]) * cp_policy_count
             cp_policy_samples += cp_policy_count
+            mate_policy_count = int(losses["mate_policy_count"])
+            value_cp_count = int(losses["value_cp_count"])
+            value_mate_count = int(losses["value_mate_count"])
+            policy_cp_loss_total += float(losses["policy_cp_loss"]) * cp_policy_count
+            policy_mate_loss_total += float(losses["policy_mate_loss"]) * mate_policy_count
+            value_cp_loss_total += float(losses["value_cp_loss"]) * value_cp_count
+            value_mate_loss_total += float(losses["value_mate_loss"]) * value_mate_count
+            policy_mate_samples += mate_policy_count
+            value_cp_samples += value_cp_count
+            value_mate_samples += value_mate_count
             teacher_scores = batch["teacher_scores"]
             value_targets = torch.where(
                 losses["value_mate"],
@@ -370,9 +396,11 @@ def evaluate(
             predicted_cp = value_scale * torch.atanh(value_predictions.reshape(-1).float().clamp(-0.999, 0.999))
             absolute_error = torch.abs(predicted_cp - teacher_scores.float())
             cp_mae_mask = cp_mask & (teacher_scores.abs() <= 300)
+            cp_mae_le_100_mask = cp_mask & (teacher_scores.abs() <= 100)
             cp_mae_gt_300_mask = cp_mask & (teacher_scores.abs() > 300)
             for mask, total_name in (
                 (cp_mae_mask, "low"),
+                (cp_mae_le_100_mask, "balanced"),
                 (cp_mask, "all"),
                 (cp_mae_gt_300_mask, "high"),
             ):
@@ -382,6 +410,9 @@ def evaluate(
                     if total_name == "low":
                         cp_mae_total += error_sum
                         cp_mae_samples += count
+                    elif total_name == "balanced":
+                        cp_mae_le_100_total += error_sum
+                        cp_mae_le_100_samples += count
                     elif total_name == "all":
                         cp_mae_all_total += error_sum
                         cp_mae_all_samples += count
@@ -392,6 +423,10 @@ def evaluate(
             if sign_mask.any():
                 sign_correct += int((value_predictions.reshape(-1)[sign_mask].sign() == teacher_scores[sign_mask].sign()).sum())
                 sign_samples += int(sign_mask.sum())
+            sign_le_100_mask = sign_mask & (teacher_scores.abs() <= 100)
+            if sign_le_100_mask.any():
+                sign_le_100_correct += int((value_predictions.reshape(-1)[sign_le_100_mask].sign() == teacher_scores[sign_le_100_mask].sign()).sum())
+                sign_le_100_samples += int(sign_le_100_mask.sum())
             sign_gt_300_mask = sign_mask & (teacher_scores.abs() > 300)
             if sign_gt_300_mask.any():
                 sign_gt_300_correct += int((value_predictions.reshape(-1)[sign_gt_300_mask].sign() == teacher_scores[sign_gt_300_mask].sign()).sum())
@@ -406,15 +441,26 @@ def evaluate(
         "value_valid": float(value_valid),
         "value_mate": float(value_mate),
         "mate_policy": float(mate_policy),
+        "policy_cp_loss": policy_cp_loss_total / max(cp_policy_samples, 1),
+        "policy_mate_loss": policy_mate_loss_total / max(policy_mate_samples, 1),
+        "policy_mate_samples": float(policy_mate_samples),
+        "value_cp_loss": value_cp_loss_total / max(value_cp_samples, 1),
+        "value_mate_loss": value_mate_loss_total / max(value_mate_samples, 1),
+        "value_cp_samples": float(value_cp_samples),
+        "value_mate_samples": float(value_mate_samples),
         "value_target_mae": value_target_mae_total / max(value_target_mae_samples, 1),
         "value_cp_mae_le_300": cp_mae_total / max(cp_mae_samples, 1),
         "value_cp_mae_samples": float(cp_mae_samples),
+        "value_cp_mae_le_100": cp_mae_le_100_total / max(cp_mae_le_100_samples, 1),
+        "value_cp_mae_le_100_samples": float(cp_mae_le_100_samples),
         "value_cp_mae_all": cp_mae_all_total / max(cp_mae_all_samples, 1),
         "value_cp_mae_all_samples": float(cp_mae_all_samples),
         "value_cp_mae_gt_300": cp_mae_gt_300_total / max(cp_mae_gt_300_samples, 1),
         "value_cp_mae_gt_300_samples": float(cp_mae_gt_300_samples),
         "value_sign_accuracy": sign_correct / max(sign_samples, 1),
         "value_sign_samples": float(sign_samples),
+        "value_sign_accuracy_le_100": sign_le_100_correct / max(sign_le_100_samples, 1),
+        "value_sign_le_100_samples": float(sign_le_100_samples),
         "value_sign_accuracy_gt_300": sign_gt_300_correct / max(sign_gt_300_samples, 1),
         "value_sign_gt_300_samples": float(sign_gt_300_samples),
         "cp_policy_kl": cp_policy_kl_total / max(cp_policy_samples, 1),
@@ -550,6 +596,8 @@ def main() -> int:
             "global_step": global_step,
             "validation": validation_with_select,
             "best_j_select": best_j_select,
+            "best_policy_kl": best_policy_kl,
+            "best_value_cp_mae": best_value_cp_mae,
             "schedule_total_steps": total_steps,
             "schedule_warmup_steps": warmup_steps,
             "config": vars(args),
@@ -557,11 +605,15 @@ def main() -> int:
                 "next_epoch_index": next_epoch_index,
                 "next_batch_index": next_batch_index,
                 "epoch_update_step": epoch_update_step,
+                "early_stopping_j_select": early_stopping_j_select,
                 "no_improve_epochs": no_improve_epochs,
             },
         }
 
     best_j_select = float("inf")
+    best_policy_kl = float("inf")
+    best_value_cp_mae = float("inf")
+    early_stopping_j_select = float("inf")
     no_improve_epochs = 0
     global_step = 0
     train_started = time.perf_counter()
@@ -604,7 +656,11 @@ def main() -> int:
         scaler.load_state_dict(checkpoint.get("scaler", {}))
         global_step = int(checkpoint.get("global_step", 0))
         best_j_select = float(checkpoint.get("best_j_select", checkpoint.get("best_validation_loss", float("inf"))))
+        checkpoint_validation = checkpoint.get("validation") or {}
+        best_policy_kl = float(checkpoint.get("best_policy_kl", checkpoint_validation.get("cp_policy_kl", float("inf"))))
+        best_value_cp_mae = float(checkpoint.get("best_value_cp_mae", checkpoint_validation.get("value_cp_mae_le_300", float("inf"))))
         training_state = checkpoint.get("training_state") or {}
+        early_stopping_j_select = float(training_state.get("early_stopping_j_select", best_j_select))
         start_epoch_index = int(training_state.get("next_epoch_index", int(checkpoint.get("epoch", 0))))
         start_batch_index = int(training_state.get("next_batch_index", 0))
         start_epoch_update_step = int(training_state.get("epoch_update_step", 0))
@@ -616,6 +672,9 @@ def main() -> int:
             "start_batch_index": start_batch_index,
             "global_step": global_step,
             "best_j_select": best_j_select,
+            "best_policy_kl": best_policy_kl,
+            "best_value_cp_mae": best_value_cp_mae,
+            "early_stopping_j_select": early_stopping_j_select,
             "no_improve_epochs": no_improve_epochs,
         })
 
@@ -695,11 +754,16 @@ def main() -> int:
                             "value_learning_rate": optimizer.param_groups[1]["lr"],
                             "joint_loss": float(loss),
                             "policy_loss": float(losses["policy_loss"]),
+                            "policy_cp_loss": float(losses["policy_cp_loss"]),
+                            "policy_mate_loss": float(losses["policy_mate_loss"]),
                             "value_loss": float(losses["value_loss"]),
+                            "value_cp_loss": float(losses["value_cp_loss"]),
+                            "value_mate_loss": float(losses["value_mate_loss"]),
                             "cp_policy_kl": float(losses["cp_policy_kl"]),
                             "policy_valid_count": int(losses["policy_valid"].sum()),
                             "value_valid_count": int(losses["value_valid"].sum()),
-                            "mate_policy_count": int(losses["mate_policy"].sum()),
+                            "mate_policy_count": int(losses["mate_policy_count"]),
+                            "value_mate_count": int(losses["value_mate_count"]),
                             "value_prediction_mean": float(value_outputs.mean()),
                             "value_saturation_ratio": float((value_outputs.abs() >= 0.99).float().mean()),
                             "gradient_norm_pre_clip": last_gradient_norm,
@@ -719,9 +783,18 @@ def main() -> int:
                 amp_enabled=amp_enabled, max_batches=50 if args.max_steps else None,
             )
             validation_j_select = compute_j_select(validation)
-            improved = validation_j_select < best_j_select - EARLY_STOPPING_MIN_DELTA
-            if improved:
+            is_best = validation_j_select < best_j_select
+            is_best_policy = validation["cp_policy_kl"] < best_policy_kl
+            is_best_value = validation["value_cp_mae_le_300"] < best_value_cp_mae
+            is_significant_improvement = validation_j_select < early_stopping_j_select - EARLY_STOPPING_MIN_DELTA
+            if is_best:
                 best_j_select = validation_j_select
+            if is_best_policy:
+                best_policy_kl = validation["cp_policy_kl"]
+            if is_best_value:
+                best_value_cp_mae = validation["value_cp_mae_le_300"]
+            if is_significant_improvement:
+                early_stopping_j_select = validation_j_select
                 no_improve_epochs = 0
             else:
                 no_improve_epochs += 1
@@ -734,12 +807,19 @@ def main() -> int:
             )
             torch.save(checkpoint, args.checkpoint_dir / "last.pt")
             torch.save(checkpoint, args.checkpoint_dir / f"epoch-{epoch + 1:04d}.pt")
-            if improved:
-                torch.save(checkpoint, args.checkpoint_dir / "best.pt")
+            if is_best:
+                torch.save(checkpoint, args.checkpoint_dir / f"best-epoch-{epoch + 1:04d}.pt")
+            if is_best_policy:
+                torch.save(checkpoint, args.checkpoint_dir / f"best-policy-epoch-{epoch + 1:04d}.pt")
+            if is_best_value:
+                torch.save(checkpoint, args.checkpoint_dir / f"best-value-epoch-{epoch + 1:04d}.pt")
             emit_log({
                 "epoch": epoch + 1, "global_step": global_step, "validation": validation,
                 "validation_j_select": validation_j_select,
                 "best_j_select": best_j_select,
+                "best_policy_kl": best_policy_kl,
+                "best_value_cp_mae": best_value_cp_mae,
+                "early_stopping_j_select": early_stopping_j_select,
                 "no_improve_epochs": no_improve_epochs,
                 "learning_rate": optimizer.param_groups[0]["lr"], "epoch_seconds": time.perf_counter() - started,
                 "value_learning_rate": optimizer.param_groups[1]["lr"],

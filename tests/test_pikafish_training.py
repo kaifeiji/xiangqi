@@ -39,6 +39,10 @@ def test_pikafish_dataset_and_typed_losses(tmp_path: Path) -> None:
     assert losses["mate_policy"].tolist() == [False, True, False]
     assert losses["value_valid"].tolist() == [True, True, True]
     assert losses["value_mate"].tolist() == [False, True, False]
+    assert losses["cp_policy_count"].item() == 1
+    assert losses["mate_policy_count"].item() == 1
+    assert losses["value_cp_count"].item() == 2
+    assert losses["value_mate_count"].item() == 1
     assert policy_logits.grad is not None
     assert predictions.grad is not None
 

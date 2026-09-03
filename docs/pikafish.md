@@ -139,7 +139,9 @@ Pikafish 引擎自身的 Hash/置换表只在同一引擎进程内复用搜索�
 
 不传 resume 参数时，脚本自动从 `checkpoint-dir/last.pt` 恢复模型、optimizer、scheduler、AMP scaler 和早停状态。只在完整 epoch 结束时保存 checkpoint。
 
-选模使用 `validation_j_select` 与 early stopping。`min_delta` 会影响 `best.pt` 是否更新：原始指标略有改善但未超过 `min_delta` 时，不覆盖 best checkpoint。比较多个 seed 或多个 epoch 时，应同时看 policy KL、value cp-MAE、sign accuracy 和最终对弈表现，不要只看单个 J 值小数点后微差。
+选模使用 `validation_j_select` 与 early stopping。每次原始 J 值严格降低都会写入带 epoch 的 `best-epoch-xxxx.pt`；最低 `cp_policy_kl` 和 `value_cp_mae_le_300` 也分别写入 `best-policy-epoch-xxxx.pt` 与 `best-value-epoch-xxxx.pt`。early stopping 的 `min_delta` 只决定何时重置 patience。比较多个 seed 或多个 epoch 时，应同时看 policy KL、value cp-MAE、sign accuracy 和最终对弈表现，不要只看单个 J 值小数点后微差。
+
+Validation 另记录 `value_cp_mae_le_100` 与 `value_sign_accuracy_le_100`，用于观察均势和微优劣局面的 value 精度；它们暂不进入 J。`progress.jsonl` 和 validation 都分别记录 CP/mate 条件下的 policy/value loss 及样本量，用于判断 mate 样本是否与 loss 或梯度范数波动相关。
 
 当前基线命令：
 
@@ -194,14 +196,14 @@ epoch 20：39.3 分钟
 | `value_sign_accuracy` | 20 | `88.52%` |
 | `value_sign_accuracy_gt_300` | 18 | `98.02%` |
 
-实际 `best.pt` 对应 epoch 18，而不是 epoch 20。原因是保存条件要求至少改善 `0.004`：
+按当时的旧选模逻辑，`best.pt` 对应 epoch 18，而不是 epoch 20。原因是保存条件要求至少改善 `0.004`：
 
 ```text
 epoch 18: J_select = 0.459481  -> 保存为 best
 epoch 20: J_select = 0.459313  -> 只好 0.000168，未超过 min_delta
 ```
 
-因此 e20 未覆盖 `best.pt` 是正确行为。e18 和 e20 差异处于 validation 波动量级：e20 的 value 指标略好，e18 的 policy loss / policy KL 略好，建议默认使用 `best.pt`。
+因此 e20 当时未覆盖 `best.pt`。当前逻辑会保存 e20，但不会因其微小改善重置 early stopping；e18 和 e20 的差异处于 validation 波动量级：e20 的 value 指标略好，e18 的 policy loss / policy KL 略好。
 
 从 epoch 1 到 epoch 18/20 的趋势：
 
@@ -212,6 +214,33 @@ policy KL:         1.1600 -> 0.8757 / 0.8781   约改善 24%
 all cp MAE:        81.01  -> 50.83 / 50.79 cp 约改善 37%
 sign accuracy:     80.53% -> 88.33% / 88.52%
 ```
+
+### `value_lr=3e-5`、`value_scale=400` 对照（2026-09-03）
+
+一组无镜像 run 使用 `learning_rate=2e-4`、`value_learning_rate=3e-5`、`value_scale=400`、`warmup_steps=220`、`epochs=26` 和 `seed=43`，在 epoch 12 因 early stopping 结束。它同时改变了 value learning rate、value scale、训练日程和 seed，不能用于归因单个参数；但可作为该组合的负面证据。
+
+| 模型 | 最低原始 J | policy KL | CP MAE <=300 | value loss | sign accuracy |
+|---|---:|---:|---:|---:|---:|
+| `vlr=3e-5, K=400` epoch 10 | `0.47817` | `0.87976` | `44.06` | `0.07838` | `87.58%` |
+| 强基线 epoch 18 | `0.45948` | `0.87568` | `41.49` | `0.06356` | `88.33%` |
+
+该 run 的 policy 已接近基线，但 value 指标仍落后。无 MCTS、13 个首着成对换色的 26 盘 benchmark 也未超过基线：epoch 7 为 `6/15/5`（得分率 `32.7%`），epoch 10 为 `10/12/4`（得分率 `46.2%`）。26 盘足以筛掉 epoch 7 这类明显退步候选，但不足以认定 epoch 10 的小负对应稳定 Elo 差异。
+
+下一项 value 消融应保持 `value_learning_rate=2e-5`、`warmup_steps=220`、无镜像及其余基线参数不变，只测试 `value_scale=400`。其结果才能区分上次退步是否主要由 K=400 引起；若 K=400 也退步，则下一步回到 K=450，仅扫描 `value_learning_rate=2.5e-5`，不应直接再次组合改变两个参数。
+
+### 选模指标与训练观测
+
+综合选模指标为：
+
+$$
+J = 0.4\frac{\mathrm{cp\_policy\_kl}}{2.0510}
+  + 0.4\frac{\mathrm{value\_cp\_mae\_le\_300}}{62.55}
+  + 0.2(1-\mathrm{value\_sign\_accuracy})
+$$
+
+J 越低越好。它是固定 validation 集上 policy 蒸馏质量与 value 回归精度的训练期代理指标，尚未按实际 Elo 校准。无 MCTS 对弈主要测 policy；MCTS 对弈才同时测 policy prior 与 value。应保留 J、policy KL 和 value MAE 各自的最佳 checkpoint，并用独立 benchmark 选择部署模型。
+
+验证集另有 `value_cp_mae_le_100` 和 `value_sign_accuracy_le_100`，用于均势和微优劣局面；该指标暂不进入 J。CP/mate 的 policy/value 条件 loss 与样本量会同时写入 progress 和 validation 日志，可据此检查 mate 样本是否与全 batch `gradient_norm_pre_clip` 尖峰和 validation 回弹相关。不要在存在此类证据前修改 mate 的 `4x` 权重。
 
 ### 早期训练健康信号
 
@@ -228,6 +257,8 @@ step 1400:  4.09
 ```
 
 梯度范数会随 batch 中 mate policy 样本数量波动；持续 `gradient_clipped=true` 本身不是危险信号，需结合原始 norm、loss 和 validation 曲线判断。
+
+`warmup_steps=220` 是当前可复现基线，不是已验证的最优值。它约为单个 epoch 的 5%，但只占 20 epoch 总计约 87,780 updates 的 0.25%。既有基线在该值下无 NaN 或 value 饱和，故在 value 参数消融中固定不变；若需研究 warmup，应在最强 value 配置下单独比较 220 与 440 steps。
 
 ### 历史稳定化 Smoke
 

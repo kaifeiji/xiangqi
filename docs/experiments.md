@@ -62,7 +62,17 @@ epoch 20：39.3 分钟
 | `value_sign_accuracy` | 20 | `88.52%` |
 | `value_sign_accuracy_gt_300` | 18 | `98.02%` |
 
-`best.pt` 对应 epoch 18。epoch 20 的 `J_select` 只比 epoch 18 好 `0.000168`，未超过 `min_delta=0.004`，因此没有覆盖 best checkpoint。默认使用 `best.pt`，不要手动追逐 e20 的微小原始优势。
+按当时的旧选模逻辑，`best.pt` 对应 epoch 18。epoch 20 的 `J_select` 只比 epoch 18 好 `0.000168`，未超过 `min_delta=0.004`，因此当时没有覆盖 best checkpoint。当前逻辑会将任何原始 J 值的新低点保存为带 epoch 的 `best-epoch-xxxx.pt`，并分别保存 policy/value 最优 checkpoint；只有改善至少 `min_delta=0.004` 时才重置 early stopping。不要据此将 e20 的微小原始优势解读为明确棋力提升。
+
+### `value_lr=3e-5`、`value_scale=400` 组合（medium）
+
+`c192-b12-lr2e4-vlr3e5-vw1-vs400-w220-e26` 使用 seed 43，计划 26 epoch，实际在 epoch 12 early stop。最低原始 J 出现在 epoch 10，为 `0.47817`；强基线最低原始 J 为 `0.45931`。新组合的 policy 已接近基线（KL `0.87976` vs `0.87568`），但 value 仍较弱（CP MAE <=300：`44.06` vs `41.49`；value loss：`0.07838` vs `0.06356`）。
+
+无 MCTS benchmark 对旧基线的 26 盘结果：epoch 7 `6/15/5`，epoch 10 `10/12/4`。结论：该组合没有超过基线，但因同时改变 value LR、value scale、epoch schedule 和 seed，不能归因于单个参数。下一步做单变量 `value_scale=400`（固定 `value_lr=2e-5`）对照；不在该轮引入 mirror 或 warmup 变化。
+
+### 选模与评估边界（strong）
+
+`validation_j_select` 组合了 policy KL、`|cp|<=300` value MAE 和 value 符号准确率，是训练期 checkpoint 筛选代理，不是 Elo。无 MCTS benchmark 基本评估 policy；MCTS benchmark 评估 policy/value 配合。26 盘首着库换色对局足以筛除明显弱模型，但不足以稳定比较接近 50% 的得分率；最终确认应扩展独立中局 FEN，并分别固定 MCTS=0 与 MCTS=1000。
 
 ### Value head 饱和与学习率（strong）
 

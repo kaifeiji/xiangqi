@@ -90,7 +90,7 @@ Vite 静态资源放在 `src/frontend/public/`，并通过 `vite.config.ts` 的 
 训练生成的 `.pt` checkpoint 不能直接被 Rust Web 服务加载，需要先导出 ONNX：
 
 ```powershell
-uv run python scripts\export_onnx.py checkpoints\pikafish-c192-b12\best.pt models\pikafish-c192-b12.onnx
+uv run python scripts\export_onnx.py checkpoints\pikafish-c192-b12\best-epoch-0018.pt models\pikafish-c192-b12.onnx
 ```
 
 导出的 `.onnx` 放在 `models/` 或其子目录。服务递归扫描 `.onnx` 文件，并用相对 `models/` 的路径作为模型 ID。Pikafish NNUE 不放在 `models/`，只通过 `PIKAFISH_PATH` 和 `PIKAFISH_NNUE_PATH` 配置。
