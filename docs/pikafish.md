@@ -139,7 +139,7 @@ Pikafish 引擎自身的 Hash/置换表只在同一引擎进程内复用搜索�
 
 不传 resume 参数时，脚本自动从 `checkpoint-dir/last.pt` 恢复模型、optimizer、scheduler、AMP scaler 和早停状态。只在完整 epoch 结束时保存 checkpoint。
 
-选模使用 `validation_j_select` 与 early stopping。每次原始 J 值严格降低都会写入带 epoch 的 `best-epoch-xxxx.pt`；最低 `cp_policy_kl` 和 `value_cp_mae_le_300` 也分别写入 `best-policy-epoch-xxxx.pt` 与 `best-value-epoch-xxxx.pt`。early stopping 的 `min_delta` 只决定何时重置 patience。比较多个 seed 或多个 epoch 时，应同时看 policy KL、value cp-MAE、sign accuracy 和最终对弈表现，不要只看单个 J 值小数点后微差。
+选模使用 `validation_j_select` 与 early stopping。每次原始 J 值、`cp_policy_kl` 或 `value_cp_mae_le_300` 创新低时，分别覆盖 `best.pt`、`best-policy.pt` 或 `best-value.pt`，文件名不带 epoch；checkpoint 内的 `epoch` 字段保留来源轮次。`last.pt` 保存最近一次完整 epoch。early stopping 的 `min_delta` 只决定何时重置 patience。比较多个 seed 或多个 epoch 时，应同时看 policy KL、value cp-MAE、sign accuracy 和最终对弈表现，不要只看单个 J 值小数点后微差。
 
 Validation 另记录 `value_cp_mae_le_100` 与 `value_sign_accuracy_le_100`，用于观察均势和微优劣局面的 value 精度；它们暂不进入 J。`progress.jsonl` 和 validation 都分别记录 CP/mate 条件下的 policy/value loss 及样本量，用于判断 mate 样本是否与 loss 或梯度范数波动相关。
 
@@ -227,6 +227,8 @@ sign accuracy:     80.53% -> 88.33% / 88.52%
 该 run 的 policy 已接近基线，但 value 指标仍落后。无 MCTS、13 个首着成对换色的 26 盘 benchmark 也未超过基线：epoch 7 为 `6/15/5`（得分率 `32.7%`），epoch 10 为 `10/12/4`（得分率 `46.2%`）。26 盘足以筛掉 epoch 7 这类明显退步候选，但不足以认定 epoch 10 的小负对应稳定 Elo 差异。
 
 下一项 value 消融应保持 `value_learning_rate=2e-5`、`warmup_steps=220`、无镜像及其余基线参数不变，只测试 `value_scale=400`。其结果才能区分上次退步是否主要由 K=400 引起；若 K=400 也退步，则下一步回到 K=450，仅扫描 `value_learning_rate=2.5e-5`，不应直接再次组合改变两个参数。
+
+本单变量对照已完成：`pikafish-c192-b12-lr2e4-vlr2e5-vw1-vs400-w220` 在 epoch 14 early stop。综合 `best.pt` 为 e12（J=`0.46727`），`best-policy.pt` 为 e13（KL=`0.87141`），`best-value.pt` 为 e9（CP MAE <=300=`42.269`）。相对 vs450 基线最佳 J=`0.45931`、CP MAE=`41.453`，vs400 未超过；但 vs400 在 e12 相对 vs450 同 epoch 的 J（`0.46727` vs `0.48656`）和 CP MAE（`42.54` vs `45.39`）更好。结论：K=400 早中期有竞争力，但后期 value 未延续优势，默认仍使用 K=450。
 
 ### 选模指标与训练观测
 

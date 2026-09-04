@@ -331,6 +331,10 @@ def compute_j_select(validation: dict[str, float]) -> float:
     )
 
 
+def save_best_checkpoint(checkpoint: dict[str, object], checkpoint_dir: Path, name: str) -> None:
+    torch.save(checkpoint, checkpoint_dir / name)
+
+
 def evaluate(
     model: PikafishResNet,
     loader: DataLoader[dict[str, Tensor]],
@@ -806,13 +810,12 @@ def main() -> int:
                 validation=validation,
             )
             torch.save(checkpoint, args.checkpoint_dir / "last.pt")
-            torch.save(checkpoint, args.checkpoint_dir / f"epoch-{epoch + 1:04d}.pt")
             if is_best:
-                torch.save(checkpoint, args.checkpoint_dir / f"best-epoch-{epoch + 1:04d}.pt")
+                save_best_checkpoint(checkpoint, args.checkpoint_dir, "best.pt")
             if is_best_policy:
-                torch.save(checkpoint, args.checkpoint_dir / f"best-policy-epoch-{epoch + 1:04d}.pt")
+                save_best_checkpoint(checkpoint, args.checkpoint_dir, "best-policy.pt")
             if is_best_value:
-                torch.save(checkpoint, args.checkpoint_dir / f"best-value-epoch-{epoch + 1:04d}.pt")
+                save_best_checkpoint(checkpoint, args.checkpoint_dir, "best-value.pt")
             emit_log({
                 "epoch": epoch + 1, "global_step": global_step, "validation": validation,
                 "validation_j_select": validation_j_select,
