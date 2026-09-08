@@ -3,7 +3,7 @@ import { request } from './api'
 import { changedMove, fenToBoard, gameWithPreviewMove, resultText, toKey } from './game-utils'
 import { MoveRecord } from './move-record'
 import { XiangqiBoard } from './xiangqi-board'
-import type { Benchmark, BenchmarkGame, CompactArchiveSnapshot, Game, ModelOption } from './types'
+import type { Benchmark, BenchmarkGame, BenchmarkGameSummary, BenchmarkSummary, CompactArchiveSnapshot, Game, ModelOption } from './types'
 
 interface BenchmarkViewProps {
   active: boolean
@@ -18,7 +18,7 @@ function modelName(models: ModelOption[], id: string): string {
 }
 
 function statusText(status: Benchmark['status']): string {
-  return { running: '运行中', paused: '已暂停', completed: '已完成', cancelled: '已暂停', failed: '失败' }[status]
+  return { queued: '排队中', running: '运行中', paused: '已暂停', completed: '已完成', cancelled: '已暂停', failed: '失败' }[status]
 }
 
 function timeText(milliseconds: number | null): string {
@@ -29,7 +29,9 @@ export function BenchmarkView({ active, models, modelsLoaded }: BenchmarkViewPro
   const [firstModel, setFirstModel] = useState('')
   const [secondModel, setSecondModel] = useState('')
   const [simulations, setSimulations] = useState(1000)
-  const [benchmarks, setBenchmarks] = useState<Benchmark[]>([])
+  const [benchmarks, setBenchmarks] = useState<BenchmarkSummary[]>([])
+  const [benchmarkGames, setBenchmarkGames] = useState<Record<string, BenchmarkGameSummary[]>>({})
+  const [gameDetails, setGameDetails] = useState<Record<string, BenchmarkGame>>({})
   const [expanded, setExpanded] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState('')
@@ -37,9 +39,40 @@ export function BenchmarkView({ active, models, modelsLoaded }: BenchmarkViewPro
 
   const load = useEffectEvent(async () => {
     try {
-      setBenchmarks(await request<Benchmark[]>('/api/benchmarks'))
+      setBenchmarks(await request<BenchmarkSummary[]>('/api/benchmarks'))
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError))
+    }
+  })
+
+  const refreshRunning = useEffectEvent(async () => {
+    const running = benchmarks.filter((benchmark) => benchmark.status === 'running')
+    if (running.length === 0) return
+    try {
+      const updates = await Promise.all(running.map((benchmark) => request<BenchmarkSummary>(`/api/benchmarks/${benchmark.id}`)))
+      setBenchmarks((current) => current.map((benchmark) => updates.find((update) => update.id === benchmark.id) ?? benchmark))
+    } catch (refreshError) {
+      setError(refreshError instanceof Error ? refreshError.message : String(refreshError))
+    }
+  })
+
+  const loadGames = useEffectEvent(async (id: string) => {
+    try {
+      const games = await request<BenchmarkGameSummary[]>(`/api/benchmarks/${id}/games`)
+      setBenchmarkGames((current) => ({ ...current, [id]: games }))
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : String(loadError))
+    }
+  })
+
+  const loadGame = useEffectEvent(async (benchmarkId: string, gameNumber: number) => {
+    try {
+      const detail = await request<BenchmarkGame>(`/api/benchmarks/${benchmarkId}/games/${gameNumber}`)
+      setGameDetails((current) => ({ ...current, [`${benchmarkId}:${gameNumber}`]: detail }))
+      return detail
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : String(loadError))
+      return null
     }
   })
 
@@ -50,11 +83,16 @@ export function BenchmarkView({ active, models, modelsLoaded }: BenchmarkViewPro
 
   useEffect(() => {
     if (active) void load()
+    return () => undefined
   }, [active])
 
   useEffect(() => {
     if (!active || !benchmarks.some((benchmark) => benchmark.status === 'running')) return
-    const timer = window.setInterval(() => void load(), 5_000)
+    const timer = window.setInterval(() => {
+      void refreshRunning()
+      const expandedBenchmark = benchmarks.find((benchmark) => benchmark.id === expanded)
+      if (expandedBenchmark?.status === 'running') void loadGames(expandedBenchmark.id)
+    }, 5_000)
     return () => window.clearInterval(timer)
   }, [active, benchmarks])
 
@@ -62,7 +100,7 @@ export function BenchmarkView({ active, models, modelsLoaded }: BenchmarkViewPro
     try {
       setCreating(true)
       setError('')
-      const benchmark = await request<Benchmark>('/api/benchmarks', {
+      const benchmark = await request<BenchmarkSummary>('/api/benchmarks', {
         method: 'POST',
         body: JSON.stringify({ first_model: firstModel, second_model: secondModel, mcts_simulations: simulations }),
       })
@@ -93,13 +131,13 @@ export function BenchmarkView({ active, models, modelsLoaded }: BenchmarkViewPro
     }
   })
 
-  const openViewer = useEffectEvent((benchmarkId: string, gameNumber: number) => {
-    const game = benchmarks.find((benchmark) => benchmark.id === benchmarkId)?.games.find((entry) => entry.number === gameNumber)
-    setViewer({ benchmarkId, gameNumber, position: Math.max((game?.snapshots?.length ?? 1) - 1, 0), previewMove: null })
+  const openViewer = useEffectEvent(async (benchmarkId: string, gameNumber: number) => {
+    const game = await loadGame(benchmarkId, gameNumber)
+    if (game) setViewer({ benchmarkId, gameNumber, position: Math.max((game.snapshots?.length ?? 1) - 1, 0), previewMove: null })
   })
 
   const currentBenchmark = viewer ? benchmarks.find((benchmark) => benchmark.id === viewer.benchmarkId) : undefined
-  const currentGame = currentBenchmark?.games.find((game) => game.number === viewer?.gameNumber)
+  const currentGame = viewer ? gameDetails[`${viewer.benchmarkId}:${viewer.gameNumber}`] : undefined
   const viewerSnapshots = currentBenchmark && currentGame ? benchmarkSnapshots(currentBenchmark, currentGame) : []
   const viewerPosition = Math.min(viewer?.position ?? 0, Math.max(viewerSnapshots.length - 1, 0))
   const viewerGame = viewerSnapshots[viewerPosition]
@@ -117,7 +155,7 @@ export function BenchmarkView({ active, models, modelsLoaded }: BenchmarkViewPro
 
   useEffect(() => {
     if (!active || !viewer || viewerComplete) return
-    const timer = window.setInterval(() => void load(), 1_000)
+    const timer = window.setInterval(() => void loadGame(viewer.benchmarkId, viewer.gameNumber), 1_000)
     return () => window.clearInterval(timer)
   }, [active, viewer, viewerComplete])
 
@@ -142,18 +180,18 @@ export function BenchmarkView({ active, models, modelsLoaded }: BenchmarkViewPro
       {benchmarks.map((benchmark) => {
         const open = expanded === benchmark.id
         return <article className="benchmark-item" key={benchmark.id}>
-          <button className="benchmark-summary" type="button" aria-expanded={open} onClick={() => setExpanded(open ? null : benchmark.id)}>
+          <button className="benchmark-summary" type="button" aria-expanded={open} onClick={() => { setExpanded(open ? null : benchmark.id); if (!open) void loadGames(benchmark.id) }}>
             <span className="benchmark-overview">
               <span className="benchmark-title"><span className={`benchmark-status ${benchmark.status}`}>{statusText(benchmark.status)}</span><strong>模型对局</strong></span>
               <span className="benchmark-models"><span title={modelName(models, benchmark.first_model)}>A · {modelName(models, benchmark.first_model)}</span><span title={modelName(models, benchmark.second_model)}>B · {modelName(models, benchmark.second_model)}</span></span>
               <span className="benchmark-config">{benchmark.mcts_simulations} sims · 开局库成对交换红黑</span>
             </span>
-            <span className="benchmark-metrics"><span className="benchmark-score"><b>A</b> {benchmark.first_wins} 胜 <i>·</i> {benchmark.draws} 和 <i>·</i> <b>B</b> {benchmark.second_wins} 胜</span><span className="benchmark-progress">完成 {benchmark.games.length} / {benchmark.games_requested} 盘</span></span>
+            <span className="benchmark-metrics"><span className="benchmark-score"><b>A</b> {benchmark.first_wins} 胜 <i>·</i> {benchmark.draws} 和 <i>·</i> <b>B</b> {benchmark.second_wins} 胜</span><span className="benchmark-progress">完成 {benchmark.games_completed} / {benchmark.games_requested} 盘</span></span>
             <span className="benchmark-time"><span>开始 <time>{timeText(benchmark.started_at_ms)}</time></span><span>结束 <time>{timeText(benchmark.finished_at_ms)}</time></span></span>
           </button>
           <span className="benchmark-actions">{benchmark.status === 'running' && <button className="benchmark-cancel" type="button" onClick={() => void pause(benchmark.id)}>暂停</button>}{benchmark.status === 'paused' && <button className="benchmark-cancel" type="button" onClick={() => void resume(benchmark.id)}>继续</button>}</span>
           {open && <ol className="benchmark-games">
-            {benchmark.games.map((game) => {
+            {(benchmarkGames[benchmark.id] ?? []).map((game) => {
               const firstIsRed = game.number % 2 === 1
               const finished = Boolean(game.result || game.error)
               return <li key={game.number}><span className="benchmark-game-opening"><strong>第 {game.number} 盘</strong><span>开局 {game.opening_move}</span></span><span className="benchmark-game-result"><strong>{benchmarkGameResultText(game, firstIsRed)}</strong><span>{game.total_plies} ply</span>{game.repetition_cycle_plies && <span>循环 ply {game.repetition_cycle_plies[0]}-{game.repetition_cycle_plies[1]}</span>}</span><span className="benchmark-game-sides"><span title={modelName(models, firstIsRed ? benchmark.first_model : benchmark.second_model)}>红：{modelName(models, firstIsRed ? benchmark.first_model : benchmark.second_model)}</span><span title={modelName(models, firstIsRed ? benchmark.second_model : benchmark.first_model)}>黑：{modelName(models, firstIsRed ? benchmark.second_model : benchmark.first_model)}</span></span><span className="benchmark-game-time"><span>开始 {timeText(game.started_at_ms)}</span>{finished && <span>结束 {timeText(game.finished_at_ms)}</span>}<strong>耗时 {(game.elapsed_ms / 1000).toFixed(1)} 秒</strong></span><button type="button" className="benchmark-review" onClick={() => openViewer(benchmark.id, game.number)}>{finished ? '复盘' : '观看'}</button>{game.error && <em>{game.error}</em>}</li>
@@ -192,14 +230,14 @@ function benchmarkGameSummary(game: BenchmarkGame): string {
   return `${result} · ${game.total_plies} ply`
 }
 
-function benchmarkGameResultText(game: BenchmarkGame, firstIsRed: boolean): string {
+function benchmarkGameResultText(game: BenchmarkGameSummary, firstIsRed: boolean): string {
   if (!game.result) return game.error ? '失败' : '进行中'
   if (game.result.startsWith('red_win')) return `红方（${firstIsRed ? 'A' : 'B'}）胜`
   if (game.result.startsWith('black_win')) return `黑方（${firstIsRed ? 'B' : 'A'}）胜`
   return resultText(game.result)
 }
 
-function benchmarkSnapshots(benchmark: Benchmark, game: BenchmarkGame): Game[] {
+export function benchmarkSnapshots(benchmark: BenchmarkSummary, game: BenchmarkGame): Game[] {
   const snapshots = game.snapshots ?? []
   if (snapshots.length === 0) {
     const fen = game.initial_fen || START_FEN
@@ -212,7 +250,7 @@ function benchmarkSnapshots(benchmark: Benchmark, game: BenchmarkGame): Game[] {
   return games
 }
 
-function snapshotToGame(benchmark: Benchmark, game: BenchmarkGame, snapshot: CompactArchiveSnapshot, index: number): Game {
+export function snapshotToGame(benchmark: BenchmarkSummary, game: BenchmarkGame, snapshot: CompactArchiveSnapshot, index: number): Game {
   return {
     game_id: `${benchmark.id}-${game.number}-${index}`,
     mode: 'model-model',

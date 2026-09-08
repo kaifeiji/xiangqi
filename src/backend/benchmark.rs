@@ -18,6 +18,51 @@ pub struct CreateRequest {
     pub first_model: String,
     pub second_model: String,
     pub mcts_simulations: usize,
+    #[serde(default)]
+    pub games: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub struct TournamentCreateRequest {
+    pub models: Vec<String>,
+    pub mcts_simulations: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Tournament {
+    pub id: Uuid,
+    pub models: Vec<String>,
+    pub mcts_simulations: usize,
+    pub games_per_match: usize,
+    pub benchmark_ids: Vec<Uuid>,
+    pub status: String,
+    pub created_at_ms: u128,
+    pub finished_at_ms: Option<u128>,
+    #[serde(default)]
+    pub ratings: HashMap<String, f64>,
+    #[serde(default)]
+    pub rated_benchmark_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub rated_game_keys: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct TournamentResponse {
+    pub id: Uuid,
+    pub models: Vec<String>,
+    pub mcts_simulations: usize,
+    pub games_per_match: usize,
+    pub benchmark_ids: Vec<Uuid>,
+    pub status: String,
+    pub created_at_ms: u128,
+    pub finished_at_ms: Option<u128>,
+    pub ratings: HashMap<String, f64>,
+}
+
+impl Tournament {
+    fn response(&self) -> TournamentResponse {
+        TournamentResponse { id: self.id, models: self.models.clone(), mcts_simulations: self.mcts_simulations, games_per_match: self.games_per_match, benchmark_ids: self.benchmark_ids.clone(), status: self.status.clone(), created_at_ms: self.created_at_ms, finished_at_ms: self.finished_at_ms, ratings: self.ratings.clone() }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -69,18 +114,24 @@ pub struct Benchmark {
     pub paused: bool,
     pub cancelled: bool,
     pub failed: bool,
+    #[serde(default)]
+    pub queued: bool,
     pub games: Vec<GameResult>,
 }
 
 impl Benchmark {
+    fn completed_games(&self) -> usize {
+        self.games.iter().filter(|game| game.result.is_some()).count()
+    }
     fn status(&self) -> &'static str {
         if self.failed { "failed" }
         else if self.paused || self.cancelled { "paused" }
-        else if self.games.len() == self.games_requested { "completed" }
+        else if self.completed_games() == self.games_requested { "completed" }
+        else if self.queued { "queued" }
         else { "running" }
     }
 
-    fn response(&self) -> Response {
+    fn summary(&self) -> BenchmarkSummary {
         let (mut first_wins, mut second_wins, mut draws) = (0, 0, 0);
         for game in &self.games {
             match game.result.as_deref() {
@@ -94,12 +145,12 @@ impl Benchmark {
                 None => {}
             }
         }
-        Response { id: self.id, first_model: self.first_model.clone(), second_model: self.second_model.clone(), mcts_simulations: self.mcts_simulations, games_requested: self.games_requested, started_at_ms: self.started_at_ms, finished_at_ms: self.finished_at_ms, status: self.status(), first_wins, second_wins, draws, games: self.games.clone() }
+        BenchmarkSummary { id: self.id, first_model: self.first_model.clone(), second_model: self.second_model.clone(), mcts_simulations: self.mcts_simulations, games_requested: self.games_requested, started_at_ms: self.started_at_ms, finished_at_ms: self.finished_at_ms, status: self.status(), first_wins, second_wins, draws, games_completed: self.completed_games() }
     }
 }
 
 #[derive(Serialize)]
-pub struct Response {
+    pub struct BenchmarkSummary {
     pub id: Uuid,
     pub first_model: String,
     pub second_model: String,
@@ -111,11 +162,41 @@ pub struct Response {
     pub first_wins: usize,
     pub second_wins: usize,
     pub draws: usize,
-    pub games: Vec<GameResult>,
+    pub games_completed: usize,
+}
+
+#[derive(Serialize)]
+pub struct GameSummary {
+    pub number: usize,
+    pub opening_move: String,
+    pub started_at_ms: u128,
+    pub finished_at_ms: u128,
+    pub result: Option<String>,
+    pub total_plies: usize,
+    pub rule60: u16,
+    pub elapsed_ms: u128,
+    pub error: Option<String>,
+    pub repetition_cycle_plies: Option<(usize, usize)>,
 }
 
 pub type Benchmarks = Arc<RwLock<HashMap<Uuid, Benchmark>>>;
 pub type Controls = Arc<RwLock<HashMap<Uuid, Arc<AtomicBool>>>>;
+pub type Tournaments = Arc<RwLock<HashMap<Uuid, Tournament>>>;
+
+pub fn load_tournaments(path: &FilePath) -> HashMap<Uuid, Tournament> {
+    let mut tournaments = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(path) else { return tournaments };
+    for entry in entries.flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path()) else { continue };
+        if let Ok(mut tournament) = serde_json::from_str::<Tournament>(&text) {
+            for model in &tournament.models {
+                tournament.ratings.entry(model.clone()).or_insert(1500.0);
+            }
+            tournaments.insert(tournament.id, tournament);
+        }
+    }
+    tournaments
+}
 
 pub fn load(path: &FilePath) -> HashMap<Uuid, Benchmark> {
     let mut benchmarks = HashMap::new();
@@ -123,7 +204,10 @@ pub fn load(path: &FilePath) -> HashMap<Uuid, Benchmark> {
     for entry in entries.flatten() {
         let source = entry.path();
         let Ok(text) = std::fs::read_to_string(&source) else { continue };
-        if let Ok(benchmark) = serde_json::from_str::<Benchmark>(&text) {
+        if let Ok(mut benchmark) = serde_json::from_str::<Benchmark>(&text) {
+            if !benchmark.failed && benchmark.completed_games() < benchmark.games_requested {
+                benchmark.paused = true;
+            }
             let target = path.join(file_name(&benchmark));
             if source != target && !target.exists() {
                 let _ = std::fs::rename(source, target);
@@ -134,15 +218,18 @@ pub fn load(path: &FilePath) -> HashMap<Uuid, Benchmark> {
     benchmarks
 }
 
-pub async fn create(State(state): State<AppState>, Json(request): Json<CreateRequest>) -> Result<Json<Response>, ApiError> {
+pub async fn create(State(state): State<AppState>, Json(request): Json<CreateRequest>) -> Result<Json<BenchmarkSummary>, ApiError> {
     if request.first_model == request.second_model { return Err(ApiError::bad_request("benchmark models must differ")); }
     if ![0, 1000, 5000, 10000].contains(&request.mcts_simulations) { return Err(ApiError::bad_request("invalid mcts_simulations")); }
     let first_path = crate::models::validate(&request.first_model).ok_or_else(|| ApiError::bad_request("first model not found"))?;
     let second_path = crate::models::validate(&request.second_model).ok_or_else(|| ApiError::bad_request("second model not found"))?;
-    let games_requested = MAINSTREAM_OPENINGS.len() * 2;
-    let benchmark = Benchmark { id: Uuid::new_v4(), first_model: request.first_model.clone(), second_model: request.second_model.clone(), mcts_simulations: request.mcts_simulations, games_requested, started_at_ms: now_ms(), finished_at_ms: None, paused: false, cancelled: false, failed: false, games: Vec::new() };
+    let games_requested = request.games.unwrap_or(MAINSTREAM_OPENINGS.len() * 2);
+    if games_requested == 0 || games_requested > MAINSTREAM_OPENINGS.len() * 2 || games_requested % 2 != 0 {
+        return Err(ApiError::bad_request("games must be a positive even number within the opening book"));
+    }
+    let benchmark = Benchmark { id: Uuid::new_v4(), first_model: request.first_model.clone(), second_model: request.second_model.clone(), mcts_simulations: request.mcts_simulations, games_requested, started_at_ms: now_ms(), finished_at_ms: None, paused: false, cancelled: false, failed: false, queued: false, games: Vec::new() };
     save(&state.benchmark_path, &benchmark).map_err(ApiError::bad_request)?;
-    let response = benchmark.response();
+    let response = benchmark.summary();
     let id = benchmark.id;
     state.benchmarks.write().await.insert(id, benchmark);
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -150,18 +237,158 @@ pub async fn create(State(state): State<AppState>, Json(request): Json<CreateReq
     let benchmarks = Arc::clone(&state.benchmarks);
     let controls = Arc::clone(&state.benchmark_controls);
     let path = state.benchmark_path.clone();
-    tokio::task::spawn_blocking(move || run(request, first_path, second_path, id, path, benchmarks, controls, cancelled));
+    let queue = Arc::clone(&state.benchmark_queue);
+    let active = Arc::clone(&state.active_benchmark);
+    let tournaments = Arc::clone(&state.tournaments);
+    tokio::spawn(async move {
+        let _queue_guard = queue.lock().await;
+        *active.write().await = Some(id);
+        mark_started(&benchmarks, &path, id).await;
+        let _ = tokio::task::spawn_blocking(move || run(request, first_path, second_path, id, path, benchmarks, controls, cancelled, tournaments)).await;
+        if *active.read().await == Some(id) { *active.write().await = None; }
+    });
     Ok(Json(response))
 }
 
-pub async fn list(State(state): State<AppState>) -> Json<Vec<Response>> {
-    let mut benchmarks: Vec<_> = state.benchmarks.read().await.values().cloned().collect();
-    benchmarks.sort_by_key(|benchmark| std::cmp::Reverse(benchmark.started_at_ms));
-    Json(benchmarks.iter().map(Benchmark::response).collect())
+fn update_elo(ratings: &mut HashMap<String, f64>, first_model: &str, second_model: &str, first_score: f64) {
+    let first_rating = *ratings.entry(first_model.to_owned()).or_insert(1500.0);
+    let second_rating = *ratings.entry(second_model.to_owned()).or_insert(1500.0);
+    let expected = 1.0 / (1.0 + 10.0_f64.powf((second_rating - first_rating) / 400.0));
+    ratings.insert(first_model.to_owned(), first_rating + 32.0 * (first_score - expected));
+    ratings.insert(second_model.to_owned(), second_rating + 32.0 * ((1.0 - first_score) - (1.0 - expected)));
 }
 
-pub async fn get(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Response>, ApiError> {
-    state.benchmarks.read().await.get(&id).map(|job| Json(job.response())).ok_or_else(ApiError::not_found)
+pub async fn create_tournament(State(state): State<AppState>, Json(request): Json<TournamentCreateRequest>) -> Result<Json<TournamentResponse>, ApiError> {
+    if request.models.len() < 2 {
+        return Err(ApiError::bad_request("tournament requires at least two models"));
+    }
+    let mut unique = request.models.clone();
+    unique.sort();
+    unique.dedup();
+    if unique.len() != request.models.len() {
+        return Err(ApiError::bad_request("tournament models must be distinct"));
+    }
+    if ![0, 1000, 5000, 10000].contains(&request.mcts_simulations) {
+        return Err(ApiError::bad_request("invalid mcts_simulations"));
+    }
+    let paths = request.models.iter().map(|model| {
+        crate::models::validate(model).ok_or_else(|| ApiError::bad_request(format!("model not found: {model}")))
+    }).collect::<Result<Vec<_>, _>>()?;
+    let ratings = request.models.iter().map(|model| (model.clone(), 1500.0)).collect();
+    let tournament = Tournament { id: Uuid::new_v4(), models: request.models.clone(), mcts_simulations: request.mcts_simulations, games_per_match: 2, benchmark_ids: Vec::new(), status: "running".to_owned(), created_at_ms: now_ms(), finished_at_ms: None, ratings, rated_benchmark_ids: Vec::new(), rated_game_keys: Vec::new() };
+    let tournament_id = tournament.id;
+    let mut tournament = tournament;
+    for first in 0..request.models.len() {
+        for second in (first + 1)..request.models.len() {
+            let benchmark = Benchmark { id: Uuid::new_v4(), first_model: request.models[first].clone(), second_model: request.models[second].clone(), mcts_simulations: request.mcts_simulations, games_requested: 2, started_at_ms: now_ms(), finished_at_ms: None, paused: false, cancelled: false, failed: false, queued: true, games: Vec::new() };
+            save(&state.benchmark_path, &benchmark).map_err(ApiError::bad_request)?;
+            let id = benchmark.id;
+            tournament.benchmark_ids.push(id);
+            state.benchmarks.write().await.insert(id, benchmark);
+            let paused = Arc::new(AtomicBool::new(false));
+            state.benchmark_controls.write().await.insert(id, Arc::clone(&paused));
+            let benchmarks = Arc::clone(&state.benchmarks);
+            let controls = Arc::clone(&state.benchmark_controls);
+            let path = state.benchmark_path.clone();
+            let queue = Arc::clone(&state.benchmark_queue);
+            let active = Arc::clone(&state.active_benchmark);
+            let tournaments = Arc::clone(&state.tournaments);
+            let match_request = CreateRequest { first_model: request.models[first].clone(), second_model: request.models[second].clone(), mcts_simulations: request.mcts_simulations, games: Some(2) };
+            let first_path = paths[first].clone();
+            let second_path = paths[second].clone();
+            tokio::spawn(async move {
+                let _queue_guard = queue.lock().await;
+                *active.write().await = Some(id);
+                mark_started(&benchmarks, &path, id).await;
+                let _ = tokio::task::spawn_blocking(move || run(match_request, first_path, second_path, id, path, benchmarks, controls, paused, tournaments)).await;
+                if *active.read().await == Some(id) { *active.write().await = None; }
+            });
+        }
+    }
+    save_tournament(&state.benchmark_path, &tournament).map_err(ApiError::bad_request)?;
+    state.tournaments.write().await.insert(tournament_id, tournament.clone());
+    Ok(Json(tournament.response()))
+}
+
+pub async fn list_tournaments(State(state): State<AppState>) -> Json<Vec<TournamentResponse>> {
+    let mut tournaments: Vec<_> = state.tournaments.read().await.values().map(Tournament::response).collect();
+    tournaments.sort_by_key(|tournament| std::cmp::Reverse(tournament.created_at_ms));
+    Json(tournaments)
+}
+
+pub async fn get_tournament(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<TournamentResponse>, ApiError> {
+    state.tournaments.read().await.get(&id).map(|tournament| Json(tournament.response())).ok_or_else(ApiError::not_found)
+}
+
+pub async fn tournament_benchmarks(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Vec<BenchmarkSummary>>, ApiError> {
+    let ids = state.tournaments.read().await.get(&id).map(|tournament| tournament.benchmark_ids.clone()).ok_or_else(ApiError::not_found)?;
+    let active = state.active_benchmark.read().await;
+    let jobs = state.benchmarks.read().await;
+    Ok(Json(ids.into_iter().filter_map(|id| jobs.get(&id).map(|benchmark| summary_with_activity(benchmark.clone(), *active == Some(id)))).collect()))
+}
+
+pub async fn pause_tournament(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<StatusCode, ApiError> {
+    let ids = state.tournaments.read().await.get(&id).map(|tournament| tournament.benchmark_ids.clone()).ok_or_else(ApiError::not_found)?;
+    for benchmark_id in ids {
+        if let Some(control) = state.benchmark_controls.read().await.get(&benchmark_id).cloned() {
+            control.store(true, Ordering::Relaxed);
+        }
+        let mut jobs = state.benchmarks.write().await;
+        if let Some(job) = jobs.get_mut(&benchmark_id) {
+            if !job.failed && job.completed_games() < job.games_requested {
+                job.paused = true;
+                job.cancelled = false;
+                save(&state.benchmark_path, job).map_err(ApiError::bad_request)?;
+            }
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn list(State(state): State<AppState>) -> Json<Vec<BenchmarkSummary>> {
+    let active = state.active_benchmark.read().await;
+    let mut benchmarks: Vec<_> = state.benchmarks.read().await.values().cloned().map(|benchmark| {
+        let is_active = *active == Some(benchmark.id);
+        summary_with_activity(benchmark, is_active)
+    }).collect();
+    benchmarks.sort_by_key(|benchmark| std::cmp::Reverse(benchmark.started_at_ms));
+    Json(benchmarks)
+}
+
+pub async fn get(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<BenchmarkSummary>, ApiError> {
+    let active = state.active_benchmark.read().await;
+    state.benchmarks.read().await.get(&id).map(|job| Json(summary_with_activity(job.clone(), *active == Some(id)))).ok_or_else(ApiError::not_found)
+}
+
+fn summary_with_activity(benchmark: Benchmark, active: bool) -> BenchmarkSummary {
+    let mut summary = benchmark.summary();
+    if summary.status == "running" && !active {
+        summary.status = "queued";
+    }
+    summary
+}
+
+pub async fn games(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Vec<GameSummary>>, ApiError> {
+    let jobs = state.benchmarks.read().await;
+    let job = jobs.get(&id).ok_or_else(ApiError::not_found)?;
+    Ok(Json(job.games.iter().map(|game| GameSummary {
+        number: game.number,
+        opening_move: game.opening_move.clone(),
+        started_at_ms: game.started_at_ms,
+        finished_at_ms: game.finished_at_ms,
+        result: game.result.clone(),
+        total_plies: game.total_plies,
+        rule60: game.rule60,
+        elapsed_ms: game.elapsed_ms,
+        error: game.error.clone(),
+        repetition_cycle_plies: game.repetition_cycle_plies,
+    }).collect()))
+}
+
+pub async fn game(State(state): State<AppState>, Path((id, number)): Path<(Uuid, usize)>) -> Result<Json<GameResult>, ApiError> {
+    state.benchmarks.read().await.get(&id)
+        .and_then(|job| job.games.iter().find(|game| game.number == number))
+        .cloned().map(Json).ok_or_else(ApiError::not_found)
 }
 
 pub async fn cancel(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<StatusCode, ApiError> {
@@ -179,26 +406,53 @@ pub async fn cancel(State(state): State<AppState>, Path(id): Path<Uuid>) -> Resu
 }
 
 pub async fn resume(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<StatusCode, ApiError> {
-    if let Some(control) = state.benchmark_controls.read().await.get(&id).cloned() {
+    resume_one(&state, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn resume_tournament(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<StatusCode, ApiError> {
+    let ids = state.tournaments.read().await.get(&id).map(|tournament| tournament.benchmark_ids.clone()).ok_or_else(ApiError::not_found)?;
+    for benchmark_id in ids {
+        let resumable = state.benchmarks.read().await.get(&benchmark_id)
+            .is_some_and(|benchmark| benchmark.completed_games() < benchmark.games_requested);
+        if resumable {
+            resume_one(&state, benchmark_id).await?;
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn resume_one(state: &AppState, id: Uuid) -> Result<(), ApiError> {
+    let is_active = *state.active_benchmark.read().await == Some(id);
+    if is_active {
+        let control = state.benchmark_controls.read().await.get(&id).cloned();
+        if let Some(control) = control {
         control.store(false, Ordering::Relaxed);
         let mut jobs = state.benchmarks.write().await;
         let job = jobs.get_mut(&id).ok_or_else(ApiError::not_found)?;
         job.paused = false;
         job.cancelled = false;
         save(&state.benchmark_path, job).map_err(ApiError::bad_request)?;
-        return Ok(StatusCode::NO_CONTENT);
+        return Ok(());
+        }
     }
 
     let mut jobs = state.benchmarks.write().await;
     let job = jobs.get_mut(&id).ok_or_else(ApiError::not_found)?;
-    if job.failed || job.games.len() == job.games_requested {
+    if job.completed_games() == job.games_requested {
         return Err(ApiError::bad_request("benchmark cannot be resumed"));
     }
-    let request = CreateRequest { first_model: job.first_model.clone(), second_model: job.second_model.clone(), mcts_simulations: job.mcts_simulations };
+    let request = CreateRequest { first_model: job.first_model.clone(), second_model: job.second_model.clone(), mcts_simulations: job.mcts_simulations, games: Some(job.games_requested) };
     let first_path = crate::models::validate(&request.first_model).ok_or_else(|| ApiError::bad_request("first model not found"))?;
     let second_path = crate::models::validate(&request.second_model).ok_or_else(|| ApiError::bad_request("second model not found"))?;
     job.paused = false;
     job.cancelled = false;
+    job.failed = false;
+    if let Some(game) = job.games.last_mut() {
+        if game.result.is_none() {
+            game.error = None;
+        }
+    }
     save(&state.benchmark_path, job).map_err(ApiError::bad_request)?;
     drop(jobs);
 
@@ -207,17 +461,34 @@ pub async fn resume(State(state): State<AppState>, Path(id): Path<Uuid>) -> Resu
     let benchmarks = Arc::clone(&state.benchmarks);
     let controls = Arc::clone(&state.benchmark_controls);
     let path = state.benchmark_path.clone();
-    tokio::task::spawn_blocking(move || run(request, first_path, second_path, id, path, benchmarks, controls, paused));
-    Ok(StatusCode::NO_CONTENT)
+    let queue = Arc::clone(&state.benchmark_queue);
+    let active = Arc::clone(&state.active_benchmark);
+    let tournaments = Arc::clone(&state.tournaments);
+    tokio::spawn(async move {
+        let _queue_guard = queue.lock().await;
+        *active.write().await = Some(id);
+        mark_started(&benchmarks, &path, id).await;
+        let _ = tokio::task::spawn_blocking(move || run(request, first_path, second_path, id, path, benchmarks, controls, paused, tournaments)).await;
+        if *active.read().await == Some(id) { *active.write().await = None; }
+    });
+    Ok(())
 }
 
-fn run(request: CreateRequest, first_path: String, second_path: String, id: Uuid, path: PathBuf, benchmarks: Benchmarks, controls: Controls, paused: Arc<AtomicBool>) {
+async fn mark_started(benchmarks: &Benchmarks, path: &FilePath, id: Uuid) {
+    let mut jobs = benchmarks.write().await;
+    if let Some(job) = jobs.get_mut(&id) {
+        job.queued = false;
+        let _ = save(path, job);
+    }
+}
+
+fn run(request: CreateRequest, first_path: String, second_path: String, id: Uuid, path: PathBuf, benchmarks: Benchmarks, controls: Controls, paused: Arc<AtomicBool>, tournaments: Tournaments) {
     loop {
         if paused.load(Ordering::Relaxed) { break; }
         let index = {
             let jobs = benchmarks.blocking_read();
             let Some(job) = jobs.get(&id) else { return };
-            if job.failed || job.games.len() == job.games_requested { break; }
+            if job.failed || job.completed_games() == job.games_requested { break; }
             if job.games.last().is_some_and(|game| game.result.is_none() && game.error.is_none()) { job.games.len() - 1 } else { job.games.len() }
         };
         let first_red = index % 2 == 0;
@@ -241,13 +512,46 @@ fn run(request: CreateRequest, first_path: String, second_path: String, id: Uuid
         if paused.load(Ordering::Relaxed) {
             job.paused = true;
             job.cancelled = false;
-        } else if job.games.len() == job.games_requested || job.failed {
+        } else if job.completed_games() == job.games_requested || job.failed {
             job.finished_at_ms = Some(now_ms());
             job.paused = false;
         }
         let _ = save(&path, job);
     }
+    update_tournament_for_benchmark(id, &benchmarks, &tournaments, &path);
     controls.blocking_write().remove(&id);
+}
+
+fn update_tournament_for_benchmark(id: Uuid, benchmarks: &Benchmarks, tournaments: &Tournaments, path: &FilePath) {
+    let Some(tournament_id) = tournaments.blocking_read().iter()
+        .find(|(_, tournament)| tournament.benchmark_ids.contains(&id))
+        .map(|(tournament_id, _)| *tournament_id) else { return };
+    let mut tournament_jobs = tournaments.blocking_write();
+    let Some(tournament) = tournament_jobs.get_mut(&tournament_id) else { return };
+    let benchmark_jobs = benchmarks.blocking_read();
+    let Some(benchmark) = benchmark_jobs.get(&id) else { return };
+    for game in &benchmark.games {
+        if game.result.is_none() { continue }
+        let key = format!("{}:{}", id, game.number);
+        if !tournament.rated_game_keys.contains(&key) {
+            let first_score = if game.result.as_deref().is_some_and(|result| result.starts_with("draw")) { 0.5 } else if game.result.as_deref().is_some_and(|result| result.starts_with("red_win")) == (game.number % 2 == 1) { 1.0 } else { 0.0 };
+            update_elo(&mut tournament.ratings, &benchmark.first_model, &benchmark.second_model, first_score);
+            tournament.rated_game_keys.push(key);
+        }
+    }
+    let related = tournament.benchmark_ids.iter().filter_map(|id| benchmark_jobs.get(id));
+    if related.clone().any(|benchmark| benchmark.failed) {
+        tournament.status = "failed".to_owned();
+    } else if related.clone().all(|benchmark| benchmark.completed_games() == benchmark.games_requested) {
+        tournament.status = "completed".to_owned();
+        tournament.finished_at_ms = Some(now_ms());
+    } else if related.clone().any(|benchmark| benchmark.status() == "running" || benchmark.status() == "queued") {
+        tournament.status = "running".to_owned();
+        tournament.finished_at_ms = None;
+    } else {
+        tournament.status = "paused".to_owned();
+    }
+    let _ = save_tournament(path, tournament);
 }
 
 fn play(
@@ -403,9 +707,7 @@ fn save(path: &FilePath, benchmark: &Benchmark) -> Result<(), String> {
     std::fs::create_dir_all(path).map_err(|error| error.to_string())?;
     let data = serde_json::to_vec_pretty(benchmark).map_err(|error| error.to_string())?;
     let target = path.join(file_name(benchmark));
-    let temporary = target.with_extension("json.tmp");
-    std::fs::write(&temporary, data).map_err(|error| error.to_string())?;
-    std::fs::rename(temporary, target).map_err(|error| error.to_string())
+    std::fs::write(target, data).map_err(|error| error.to_string())
 }
 
 fn now_ms() -> u128 {
@@ -422,4 +724,42 @@ fn file_name(benchmark: &Benchmark) -> String {
         .map(|time| time.format("%Y%m%d-%H%M%S-%3f").to_string())
         .unwrap_or_else(|| "unknown-time".to_owned());
     format!("{timestamp}.json")
+}
+
+fn save_tournament(path: &FilePath, tournament: &Tournament) -> Result<(), String> {
+    std::fs::create_dir_all(path).map_err(|error| error.to_string())?;
+    let data = serde_json::to_vec_pretty(tournament).map_err(|error| error.to_string())?;
+    let target = path.join(tournament_file_name(tournament));
+    std::fs::write(target, data).map_err(|error| error.to_string())
+}
+
+fn tournament_file_name(tournament: &Tournament) -> String {
+    format!("tournament-{}.json", tournament.id)
+}
+
+pub fn migrate_tournaments(path: &FilePath, benchmarks: &HashMap<Uuid, Benchmark>, tournaments: &mut HashMap<Uuid, Tournament>) {
+    for tournament in tournaments.values_mut() {
+        tournament.ratings = tournament.models.iter().map(|model| (model.clone(), 1500.0)).collect();
+        tournament.rated_benchmark_ids.clear();
+        for benchmark_id in &tournament.benchmark_ids {
+            let Some(benchmark) = benchmarks.get(benchmark_id) else { continue };
+            for game in &benchmark.games {
+                let Some(result) = game.result.as_deref() else { continue };
+                let first_score = if result.starts_with("draw") { 0.5 } else if result.starts_with("red_win") == (game.number % 2 == 1) { 1.0 } else { 0.0 };
+                update_elo(&mut tournament.ratings, &benchmark.first_model, &benchmark.second_model, first_score);
+                tournament.rated_game_keys.push(format!("{}:{}", benchmark_id, game.number));
+            }
+            if benchmark.completed_games() == benchmark.games_requested { tournament.rated_benchmark_ids.push(*benchmark_id); }
+        }
+        tournament.status = if tournament.benchmark_ids.iter().any(|id| benchmarks.get(id).is_some_and(|benchmark| benchmark.failed)) {
+            "failed".to_owned()
+        } else if tournament.benchmark_ids.iter().all(|id| benchmarks.get(id).is_some_and(|benchmark| benchmark.completed_games() == benchmark.games_requested)) {
+            tournament.finished_at_ms = tournament.finished_at_ms.or_else(|| Some(now_ms()));
+            "completed".to_owned()
+        } else {
+            tournament.finished_at_ms = None;
+            "paused".to_owned()
+        };
+        let _ = save_tournament(path, tournament);
+    }
 }

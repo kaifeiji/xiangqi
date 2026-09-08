@@ -1,5 +1,5 @@
 export type GameMode = 'human-model' | 'model-model'
-export type Mode = GameMode | 'replay' | 'benchmark'
+export type Mode = GameMode | 'replay' | 'benchmark' | 'tournament'
 export type Side = 'w' | 'b'
 
 export interface BoardCell {
@@ -68,7 +68,9 @@ export interface BenchmarkGame {
   repetition_cycle_plies: [number, number] | null
 }
 
-export interface Benchmark {
+export type BenchmarkGameSummary = Omit<BenchmarkGame, 'initial_fen' | 'snapshots'>
+
+export interface BenchmarkSummary {
   id: string
   first_model: string
   second_model: string
@@ -76,10 +78,14 @@ export interface Benchmark {
   games_requested: number
   started_at_ms: number
   finished_at_ms: number | null
-  status: 'running' | 'paused' | 'completed' | 'cancelled' | 'failed'
+  status: 'queued' | 'running' | 'paused' | 'completed' | 'cancelled' | 'failed'
   first_wins: number
   second_wins: number
   draws: number
+  games_completed: number
+}
+
+export interface Benchmark extends BenchmarkSummary {
   games: BenchmarkGame[]
 }
 

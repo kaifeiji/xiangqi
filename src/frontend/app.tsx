@@ -4,10 +4,11 @@ import { HumanModelView } from './human-model-view'
 import { BenchmarkView } from './benchmark-view'
 import { ModelMatchView } from './model-match-view'
 import { ReplayView } from './replay-view'
+import { TournamentView } from './tournament-view'
 import type { Mode, ModelOption } from './types'
 
 const modeStorageKey = 'xiangqi.active-mode'
-const modes: Mode[] = ['human-model', 'model-model', 'benchmark', 'replay']
+const modes: Mode[] = ['human-model', 'model-model', 'benchmark', 'tournament', 'replay']
 
 function initialMode(): Mode {
   const stored = window.localStorage.getItem(modeStorageKey)
@@ -43,6 +44,7 @@ export function App(): React.JSX.Element {
             ['human-model', '人机'],
             ['model-model', '模型对弈'],
             ['benchmark', '基准'],
+            ['tournament', '积分赛'],
             ['replay', '回放'],
           ] as const).map(([value, label]) => (
             <button key={value} type="button" aria-selected={mode === value} onClick={() => selectMode(value)}>{label}</button>
@@ -53,6 +55,7 @@ export function App(): React.JSX.Element {
       <HumanModelView active={mode === 'human-model'} models={models} modelsLoaded={modelsLoaded} />
       <ModelMatchView active={mode === 'model-model'} models={models} modelsLoaded={modelsLoaded} />
       <BenchmarkView active={mode === 'benchmark'} models={models} modelsLoaded={modelsLoaded} />
+      <TournamentView active={mode === 'tournament'} models={models} modelsLoaded={modelsLoaded} />
       <ReplayView active={mode === 'replay'} />
     </main>
   )

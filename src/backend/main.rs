@@ -43,11 +43,17 @@ async fn main() {
     let benchmark_path = std::env::var("BENCHMARK_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("benchmark"));
+    let benchmarks = benchmark::load(&benchmark_path);
+    let mut tournaments = benchmark::load_tournaments(&benchmark_path);
+    benchmark::migrate_tournaments(&benchmark_path, &benchmarks, &mut tournaments);
     let state = AppState {
         games: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        benchmarks: std::sync::Arc::new(tokio::sync::RwLock::new(benchmark::load(&benchmark_path))),
+        benchmarks: std::sync::Arc::new(tokio::sync::RwLock::new(benchmarks)),
         benchmark_controls: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         benchmark_path,
+        benchmark_queue: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        active_benchmark: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        tournaments: std::sync::Arc::new(tokio::sync::RwLock::new(tournaments)),
     };
     let app = api::router(state)
         .route("/health", get(|| async { "ok" }))

@@ -59,6 +59,9 @@ pub struct AppState {
     pub benchmarks: crate::benchmark::Benchmarks,
     pub benchmark_controls: crate::benchmark::Controls,
     pub benchmark_path: std::path::PathBuf,
+    pub benchmark_queue: Arc<tokio::sync::Mutex<()>>,
+    pub active_benchmark: Arc<RwLock<Option<uuid::Uuid>>>,
+    pub tournaments: crate::benchmark::Tournaments,
 }
 
 pub struct Session {
