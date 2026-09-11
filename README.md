@@ -117,6 +117,24 @@ uv run python scripts\train_pikafish.py `
 
 该配置 20 epoch 已跑完，`best.pt` 对应 epoch 18；指标、训练趋势、旧 50-step smoke 和失效实验记录见 [docs/pikafish.md](docs/pikafish.md)。
 
+当前最强训练候选为 `c192-b12 + SE + mirror`：
+
+```powershell
+uv run python scripts\train_pikafish.py `
+  --data-dir data\processed\pikafish-distillation\dataset `
+  --checkpoint-dir checkpoints\15-pikafish-c192-b12-se `
+  --epochs 20 `
+  --learning-rate 2e-4 --value-learning-rate 2e-5 --min-learning-rate 5e-6 `
+  --warmup-steps 220 --weight-decay 1e-4 `
+  --temperature 100 --value-scale 450 --policy-weight 1 --value-weight 1 `
+  --micro-batch-size 1024 --global-batch-size 2048 `
+  --max-grad-norm 1 --block-size 65536 `
+  --num-workers 8 --prefetch-factor 4 --seed 42 `
+  --mirror --use-se
+```
+
+截至 epoch 16，该候选的最佳验证指标为 J=`0.43085`、policy KL=`0.81968`、value CP MAE=`39.05` cp。它是训练 validation 结果，不是通用人类 Elo；独立对局评估仍需固定 MCTS、开局库、时间控制和换色方式。
+
 ### 4. 导出 ONNX 并启动 Web 对弈
 
 ```powershell

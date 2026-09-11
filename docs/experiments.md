@@ -12,7 +12,7 @@
 
 | 领域 | 当前基线 | 证据 |
 |---|---|---|
-| Pikafish 蒸馏训练 | `c192-b12`、无镜像、`micro/global=2048/2048`、policy LR `2e-4`、value LR `2e-5`、`value-scale=450`、`temperature=100` | `strong` |
+| Pikafish 蒸馏训练 | 在最强 `14` mirror 基线上增加 SE：`c192-b12`、SE+mirror、`micro/global=1024/2048`、policy LR `2e-4`、value LR `2e-5`、`value-scale=450`、`temperature=100` | `strong` |
 | 模型对局 benchmark | 主流开局库成对换色，盘数为 `MAINSTREAM_OPENINGS.len() * 2` | `strong` |
 | MCTS 固定算力 | 以 `mcts_simulations` 控制：`0 / 1000 / 5000 / 10000` | `strong` |
 | 反循环规则 | 模型方优先选择不回到历史局面的合法着，三次重复作和棋兜底 | `strong` |
@@ -91,7 +91,7 @@ epoch 20：39.3 分钟
 
 ### Mirror 取舍（medium）
 
-镜像增强理论上合理，但在当前训练轨道下实际成本接近翻倍。此前 `micro/global=2048/4096 + mirror` 相当于每个 update 处理约 `8192` 个局面，明显慢于无镜像 `2048/2048` 的约 `2048` 局面/update。当前基线暂不启用 mirror，先用非镜像配方稳定训练和对局验证。
+镜像增强理论上合理，但在当前训练轨道下实际成本接近翻倍。此前 `micro/global=2048/4096 + mirror` 相当于每个 update 处理约 `8192` 个局面，明显慢于无镜像 `2048/2048` 的约 `2048` 局面/update。无镜像配方保留为历史对照；当前实验以最强的 `14` mirror 配方为基线，并在其上增加 SE 形成 `15`。
 
 ### 阶段训练经验（weak）
 
@@ -236,6 +236,47 @@ benchmark 不再将取消视为终止结果。暂停时已完成对局和中断�
 `20260902-132851-469.json` 使用 `mcts_simulations=1000`，当前只完成 2/26 盘，结果为红胜 1、黑胜 1。两盘耗时分别约 `430.6s` 和 `566.8s`。
 
 结论：c192 + 1000 sims 的完整 26 盘 benchmark 成本很高，不适合频繁调参时作为第一层筛选。建议先用纯 policy 或少量固定局面复盘做快速筛，再跑完整 MCTS benchmark。
+
+## 最新 benchmark 实验
+
+### Mirror 与无 mirror 的最新对局结果（reported，2026-09-10）
+
+根据最新 benchmark 结果，`14 mirror` 相对 `11 无 mirror` 的汇总战绩为：
+
+```text
+mirror 胜：15
+和棋：0
+mirror 负：7
+```
+
+该结果支持 mirror 配方在实际对局中优于无 mirror 配方的结论。
+
+## 最新训练实验
+
+### 在最强 mirror 基线上增加 SE（strong，2026-09-11）
+
+`14-pikafish-c192-b12-lr2e4-vlr2e5-vw1-vs450-w220-mirror` 是当时最强的 mirror 基线。`15-pikafish-c192-b12-se` 在该配置上增加残差分支 SE（reduction=`16`），其余主要训练条件保持一致；这不是独立比较 mirror 与 SE，而是对 `14` 做 SE 增量实验。`14` 完成到 epoch 13，`15` 至少完成到 epoch 16。
+
+关键最佳验证指标：
+
+| 实验 | 最佳 J-Select | 最佳 Policy KL | 最佳 Value CP MAE <=300 | 最佳 Value sign accuracy |
+|---|---:|---:|---:|---:|
+| `14` mirror 基线 | `0.45270` | `0.82879` | `41.07` cp | `88.01%` |
+| `15` mirror + SE | `0.43085` | `0.81968` | `39.05` cp | `89.35%` |
+
+epoch 对齐比较显示，`15` 从 epoch 3 起整体优于 `14`，后期仍刷新综合指标。`15` 的 value 曲线也更稳定：从 epoch 5 起，`value_cp_mae_le_300` 的范围约为 `12.46`、相邻 epoch 平均绝对变化约为 `2.93`；`14` 对应约为 `30.97` 和 `7.88`。这支持“SE 改善共享骨干对 value 分支的稳定性”的假设，但仍需要不同 seed 的重复实验才能把它提升为严格因果结论。
+
+三类 checkpoint 必须分别理解：
+
+```text
+best.pt        -> J-Select 最低
+best-policy.pt -> cp_policy_kl 最低
+best-value.pt  -> value_cp_mae_le_300 最低
+```
+
+当前早停只依据 J-Select 的显著改善（`min_delta=0.004`），不会因为 policy KL 或 value MAE 的单独改善重置 patience。若目标是继续挖 policy 上限，应将早停改为三项指标都停滞后才触发。
+
+当前结论：`15` 是在最强 `14` mirror 基线上增加 SE 后得到的当前最强训练验证结果，建议作为当前默认训练/导出候选；部署前仍需固定 MCTS、开局库和换色方式做独立 benchmark。上述 J、KL 和 MAE 不是通用中国象棋等级分，也不能直接换算成人类段位或 Elo。
 
 ## 已废弃或暂缓方向
 

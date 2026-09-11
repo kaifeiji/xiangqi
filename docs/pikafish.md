@@ -133,9 +133,42 @@ Pikafish 引擎自身的 Hash/置换表只在同一引擎进程内复用搜索�
 
 ## Joint Policy/Value 训练
 
+### 当前最佳候选：SE + mirror（2026-09-11）
+
+完成了 `15-pikafish-c192-b12-se`：
+
+```text
+model:                 c192-b12
+SE:                    enabled, reduction=16
+mirror:                enabled
+micro/global batch:    1024 / 2048
+policy learning rate:  2e-4
+value learning rate:   2e-5
+value scale:           450
+temperature:           100
+policy/value weight:   1 / 1
+warmup steps:          220
+epochs:                20
+```
+
+截至 epoch 16 的最佳验证结果：
+
+```text
+J-select:              0.4308547
+cp policy KL:          0.8196843
+value CP MAE <=300:    39.0462 cp
+value sign accuracy:   89.3507%
+```
+
+对照 mirror 基线 `14` 的最佳结果为 J=`0.45270`、policy KL=`0.82879`、value CP MAE=`41.07` cp、sign accuracy=`88.01%`。`15` 的 value 曲线在后期也更平滑，但这仍是单个 seed 的对照，不能替代不同 seed 的重复实验。
+
+`best.pt`、`best-policy.pt`、`best-value.pt` 分别按 J、policy KL、value CP MAE 保存；early stopping 当前只按 J-select 的 `min_delta=0.004` 重置 patience。因此 policy 仍有微小改善时，训练仍可能因综合 J 未显著改善而早停。若要继续优化 policy，应改用多指标停滞条件。
+
+该结果是固定 validation 集上的训练代理指标，不是通用中国象棋 Elo。正式棋力比较仍需固定 MCTS/时间、开局库和换色方式进行独立对局 benchmark。
+
 `train_pikafish.py` 读取 ragged 合法着 NPY，训练 `PikafishResNet` 的 8100-logit joint policy head 和 bounded value head。
 
-当前已完成一组可复现的无镜像 20 epoch 训练。它是目前最稳的 c192-b12 Pikafish 蒸馏基线；后续是否发布仍需结合对弈 benchmark 判断。
+无镜像 20 epoch 训练保留为历史可复现基线；当前最强候选是以 `14` mirror 配方为基础、增加 SE 机制得到的 `15-pikafish-c192-b12-se`。是否发布仍需结合独立对弈 benchmark 判断。
 
 不传 resume 参数时，脚本自动从 `checkpoint-dir/last.pt` 恢复模型、optimizer、scheduler、AMP scaler 和早停状态。只在完整 epoch 结束时保存 checkpoint。
 
