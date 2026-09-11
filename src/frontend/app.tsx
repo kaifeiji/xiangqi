@@ -18,6 +18,7 @@ function initialMode(): Mode {
 
 export function App(): React.JSX.Element {
   const [mode, setMode] = useState<Mode>(initialMode)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [models, setModels] = useState<ModelOption[]>([])
   const [error, setError] = useState('')
   const [modelsLoaded, setModelsLoaded] = useState(false)
@@ -34,6 +35,7 @@ export function App(): React.JSX.Element {
   const selectMode = (nextMode: Mode) => {
     window.localStorage.setItem(modeStorageKey, nextMode)
     setMode(nextMode)
+    setMobileMenuOpen(false)
   }
 
   return (
@@ -52,6 +54,23 @@ export function App(): React.JSX.Element {
             <button key={value} type="button" aria-selected={mode === value} onClick={() => selectMode(value)}>{label}</button>
           ))}
         </nav>
+        <div className="mobile-mode-menu">
+          <button className="hamburger-button" type="button" aria-label="打开模式菜单" aria-expanded={mobileMenuOpen} onClick={() => setMobileMenuOpen((open) => !open)}>
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+            <span aria-hidden="true" />
+          </button>
+          {mobileMenuOpen && <nav className="mobile-mode-options" aria-label="模式切换">
+            {([
+              ['human-model', '人机'],
+              ['model-model', '模型对弈'],
+              ['training', '训练'],
+              ['benchmark', '基准'],
+              ['tournament', '积分赛'],
+              ['replay', '回放'],
+            ] as const).map(([value, label]) => <button key={value} type="button" aria-selected={mode === value} onClick={() => selectMode(value)}>{label}</button>)}
+          </nav>}
+        </div>
       </header>
       {error && <p className="error" role="alert">{error}</p>}
       <HumanModelView active={mode === 'human-model'} models={models} modelsLoaded={modelsLoaded} />

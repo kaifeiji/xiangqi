@@ -168,15 +168,18 @@ export function BenchmarkView({ active, models, modelsLoaded }: BenchmarkViewPro
   }, [active, viewer, viewerComplete, viewerSnapshots.length])
 
   return <section className="benchmark-view" hidden={!active} aria-label="模型基准">
-    <form className="benchmark-form" onSubmit={(event) => { event.preventDefault(); void create() }}>
-      <label>模型 A<select value={firstModel} onChange={(event) => setFirstModel(event.target.value)} disabled={!modelsLoaded || creating}>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
-      <label>模型 B<select value={secondModel} onChange={(event) => setSecondModel(event.target.value)} disabled={!modelsLoaded || creating}>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
-      <label>MCTS<select value={simulations} onChange={(event) => setSimulations(Number(event.target.value))} disabled={creating}>{simulationOptions.map((value) => <option key={value} value={value}>{value} 次</option>)}</select></label>
-      <button type="submit" disabled={creating || !firstModel || firstModel === secondModel}>{creating ? '创建中...' : '开始基准'}</button>
-    </form>
+    <header className="view-header benchmark-header">
+      <div><p className="eyebrow">MODEL BENCHMARK</p><h2>模型基准</h2><p>固定开局和搜索参数，比较模型的实际对局表现。</p></div>
+      <form className="benchmark-form" onSubmit={(event) => { event.preventDefault(); void create() }}>
+        <label>模型 A<select value={firstModel} onChange={(event) => setFirstModel(event.target.value)} disabled={!modelsLoaded || creating}>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
+        <label>模型 B<select value={secondModel} onChange={(event) => setSecondModel(event.target.value)} disabled={!modelsLoaded || creating}>{models.map((model) => <option key={model.id} value={model.id}>{model.name}</option>)}</select></label>
+        <label>MCTS<select value={simulations} onChange={(event) => setSimulations(Number(event.target.value))} disabled={creating}>{simulationOptions.map((value) => <option key={value} value={value}>{value} 次</option>)}</select></label>
+        <button type="submit" disabled={creating || !firstModel || firstModel === secondModel}>{creating ? '创建中...' : '开始基准'}</button>
+      </form>
+    </header>
     {error && <p className="error" role="alert">{error}</p>}
     <div className="benchmark-list">
-      {benchmarks.length === 0 && <p className="benchmark-empty">尚无 benchmark</p>}
+      {benchmarks.length === 0 && <p className="benchmark-empty training-empty">暂无基准记录。</p>}
       {benchmarks.map((benchmark) => {
         const open = expanded === benchmark.id
         return <article className="benchmark-item" key={benchmark.id}>

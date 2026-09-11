@@ -396,12 +396,12 @@ export function TrainingView({ active }: { active: boolean }): React.JSX.Element
 
   return (
     <section className="training-view" hidden={!active}>
-      <div className="training-header">
+      <header className="view-header training-header">
         <div><p className="eyebrow">MODEL LAB</p><h2>训练监控</h2><p>按 checkpoint 浏览训练轨迹，展开卡片查看所有可用参数。</p></div>
         <button type="button" className="training-refresh" onClick={() => setReloadToken((value) => value + 1)}>刷新</button>
-      </div>
+      </header>
       {error && <p className="error" role="alert">{error}</p>}
-      {loading ? <p className="training-empty">正在读取 checkpoint...</p> : checkpoints.length === 0 ? <p className="training-empty">没有找到包含训练日志的 checkpoint。</p> : <div className="training-cards">{[...checkpoints].sort((left, right) => right.name.localeCompare(left.name)).map((checkpoint) => <CheckpointCard key={checkpoint.id} checkpoint={checkpoint} initiallyExpanded={false} />)}</div>}
+      {loading ? <p className="training-empty">正在读取训练记录...</p> : checkpoints.length === 0 ? <p className="training-empty">暂无训练记录。</p> : <div className="training-cards">{[...checkpoints].sort((left, right) => right.name.localeCompare(left.name)).map((checkpoint) => <CheckpointCard key={checkpoint.id} checkpoint={checkpoint} initiallyExpanded={false} />)}</div>}
     </section>
   )
 }
