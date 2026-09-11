@@ -8,6 +8,7 @@ pub fn router(state: AppState) -> Router {
     session::start_cleanup_task(&state);
     Router::new()
         .route("/api/models", get(crate::models::list))
+        .route("/api/training/checkpoints", get(crate::training::list))
         .route("/api/tournaments", get(crate::benchmark::list_tournaments).post(crate::benchmark::create_tournament))
         .route("/api/tournaments/{id}", get(crate::benchmark::get_tournament).post(crate::benchmark::resume_tournament).delete(crate::benchmark::pause_tournament))
         .route("/api/tournaments/{id}/benchmarks", get(crate::benchmark::tournament_benchmarks))

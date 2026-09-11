@@ -35,13 +35,24 @@ def load_model(checkpoint_path: Path) -> tuple[nn.Module, bool]:
         blocks = max(
             int(key.split(".")[1]) for key in state if key.startswith("residual_blocks.")
         ) + 1
-        model = PikafishResNet(channels=channels, blocks=blocks)
+        model = PikafishResNet(
+            channels=channels,
+            blocks=blocks,
+            use_se=bool(config.get("use_se", False)),
+            se_reduction=int(config.get("se_reduction", 16)),
+        )
         joint_policy = True
     else:
         channels = int(config.get("channels", state["stem.0.weight"].shape[0]))
         blocks = int(config.get("blocks", 4))
         value_head = any(key.startswith("value_head.") for key in state)
-        model = ResNet(channels=channels, blocks=blocks, value_head=value_head)
+        model = ResNet(
+            channels=channels,
+            blocks=blocks,
+            value_head=value_head,
+            use_se=bool(config.get("use_se", False)),
+            se_reduction=int(config.get("se_reduction", 16)),
+        )
         joint_policy = False
     model.load_state_dict(state)
     model.eval()

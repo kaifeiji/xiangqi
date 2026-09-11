@@ -494,11 +494,13 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--mirror", action="store_true", help="append horizontally mirrored training positions")
+    parser.add_argument("--use-se", action="store_true", help="enable squeeze-and-excitation in residual blocks")
     warmup = parser.add_mutually_exclusive_group()
     warmup.add_argument("--warmup-ratio", type=float, default=0.05)
     warmup.add_argument("--warmup-steps", type=int)
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
+    args.se_reduction = 16
 
     if args.global_batch_size < args.micro_batch_size or args.global_batch_size % args.micro_batch_size:
         parser.error("--global-batch-size must be a positive multiple of --micro-batch-size")
@@ -542,7 +544,15 @@ def main() -> int:
     train_loader = DataLoader(train_dataset, sampler=sampler, **loader_options)
     validation_loader = DataLoader(validation_dataset, shuffle=False, **loader_options)
 
-    model = PikafishResNet().to(device)
+    resume_path = args.checkpoint_dir / "last.pt"
+    resume_checkpoint = None
+    if resume_path.exists():
+        resume_checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
+        saved_config = resume_checkpoint.get("config") or {}
+        args.use_se = bool(saved_config.get("use_se", False))
+        args.se_reduction = int(saved_config.get("se_reduction", 16))
+
+    model = PikafishResNet(use_se=args.use_se, se_reduction=args.se_reduction).to(device)
     value_parameter_ids = {id(parameter) for parameter in model.value_head.parameters()}
     main_parameters = [parameter for parameter in model.parameters() if id(parameter) not in value_parameter_ids]
     optimizer = torch.optim.AdamW(
@@ -631,7 +641,8 @@ def main() -> int:
 
     resume_path = args.checkpoint_dir / "last.pt"
     if resume_path.exists():
-        checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+        checkpoint = resume_checkpoint
+        assert checkpoint is not None
         saved_schedule_total_steps = checkpoint.get("schedule_total_steps")
         saved_schedule_warmup_steps = checkpoint.get("schedule_warmup_steps")
         if saved_schedule_total_steps is None:

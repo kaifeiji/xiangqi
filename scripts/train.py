@@ -272,6 +272,7 @@ def main() -> int:
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True, help="use CUDA mixed precision")
     parser.add_argument("--value-head", action="store_true", help="train a new model with a supervised value head")
     parser.add_argument("--value-weight", type=float, default=0.5, help="weight of value loss when using --value-head")
+    parser.add_argument("--use-se", action="store_true", help="enable squeeze-and-excitation in residual blocks")
     parser.add_argument(
         "--resume",
         nargs="?",
@@ -281,6 +282,7 @@ def main() -> int:
         help="resume from checkpoint-dir/last.pt, or from CHECKPOINT when provided",
     )
     args = parser.parse_args()
+    args.se_reduction = 16
     if args.prefetch_factor < 1:
         parser.error("--prefetch-factor must be positive")
     if args.value_weight < 0:
@@ -322,10 +324,20 @@ def main() -> int:
         **loader_options,
     )
 
+    resume_checkpoint = None
+    if args.resume:
+        resume_path = args.checkpoint_dir / "last.pt" if args.resume is True else Path(args.resume)
+        resume_checkpoint = torch.load(resume_path, map_location="cpu", weights_only=False)
+        saved_config = resume_checkpoint.get("config") or {}
+        args.use_se = bool(saved_config.get("use_se", False))
+        args.se_reduction = int(saved_config.get("se_reduction", 16))
+
     model = ResNet(
         channels=args.channels,
         blocks=args.blocks,
         value_head=args.value_head,
+        use_se=args.use_se,
+        se_reduction=args.se_reduction,
     ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -346,7 +358,8 @@ def main() -> int:
 
     if args.resume:
         resume_path = args.checkpoint_dir / "last.pt" if args.resume is True else Path(args.resume)
-        checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+        checkpoint = resume_checkpoint
+        assert checkpoint is not None
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])

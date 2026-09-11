@@ -1,5 +1,5 @@
 export type GameMode = 'human-model' | 'model-model'
-export type Mode = GameMode | 'replay' | 'benchmark' | 'tournament'
+export type Mode = GameMode | 'replay' | 'benchmark' | 'tournament' | 'training'
 export type Side = 'w' | 'b'
 
 export interface BoardCell {
@@ -105,4 +105,11 @@ export interface CompactArchiveSnapshot {
   result: string | null
   mcts_debug?: MctsDebug | null
   policy_debug?: PolicyDebug | null
+}
+
+export interface TrainingCheckpoint {
+  id: string
+  name: string
+  metrics: Array<Record<string, unknown>>
+  progress: Array<Record<string, unknown>>
 }

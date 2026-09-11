@@ -544,6 +544,47 @@ button.candidate-row.selected {
 .standing-row small { display: block; margin-top: 3px; color: #765e45; font-size: 10px; }
 .standing-row > b { color: #7d2e1f; font-family: Georgia, serif; font-size: 20px; }
 
+.training-view { display: grid; gap: 18px; }
+.training-view[hidden] { display: none; }
+.training-header { display: flex; align-items: end; justify-content: space-between; gap: 20px; padding: 24px 26px; border: 1px solid #9b7652; background: linear-gradient(120deg, #f8efdd, #efe1c5); }
+.training-header h2 { margin: 2px 0 5px; color: #29170c; font-family: Georgia, serif; font-size: 31px; }
+.training-header p { margin: 0; color: #765e45; }
+.training-header .eyebrow { color: #9a3828; font-size: 11px; font-weight: 700; letter-spacing: 0.12em; }
+.training-refresh { min-height: 34px; padding: 6px 14px; border: 1px solid #7d2e1f; border-radius: 4px; background: #7d2e1f; color: #fff9ea; cursor: pointer; font: inherit; }
+.training-cards { display: grid; gap: 10px; }
+.training-card { overflow: hidden; border: 1px solid #9b7652; background: #f6edda; }
+.training-card.is-expanded { border-color: #7d2e1f; }
+.training-card-toggle { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 15px 17px; border: 0; background: transparent; color: inherit; cursor: pointer; text-align: left; }
+.training-card-title { display: grid; min-width: 0; }
+.training-card-title strong { overflow: hidden; color: #29170c; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+.training-card-title small { color: #765e45; font-size: 11px; }
+.training-card-summary { display: flex; flex-wrap: wrap; justify-content: end; gap: 8px; color: #2d5a46; font-size: 12px; font-variant-numeric: tabular-nums; }
+.training-card-meta { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 4px; padding: 0 3px 12px; }
+.training-card-meta > div { display: grid; gap: 3px; padding: 8px 10px; border-left: 2px solid #b98a58; background: #fffaf0; }
+.training-card-meta small { color: #765e45; font-size: 10px; }
+.training-card-meta strong { color: #29170c; font-size: 13px; font-variant-numeric: tabular-nums; }
+.training-parameters { display: flex; grid-column: 1 / -1; flex-wrap: wrap; gap: 6px; margin-bottom: 2px; padding: 0 3px 6px; }
+.training-parameters span { padding: 4px 7px; border: 1px solid #d2b48c; color: #765e45; font-size: 11px; font-variant-numeric: tabular-nums; }
+.training-parameters b { color: #29170c; font-weight: 600; }
+.training-card-body { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 6px; padding: 0 14px 10px; }
+.training-chart-legend { display: flex; grid-column: 1 / -1; flex-wrap: wrap; gap: 14px; padding: 6px 4px 0; color: #765e45; font-size: 11px; }
+.training-chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.chart-legend-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
+.chart-legend-dot.best, .chart-best-dot.best { fill: #1769aa; background: #1769aa; }
+.chart-legend-dot.best-policy, .chart-best-dot.best-policy { fill: #d55e00; background: #d55e00; }
+.chart-legend-dot.best-value, .chart-best-dot.best-value { fill: #7b3294; background: #7b3294; }
+.training-chart { min-width: 0; padding: 10px 10px 6px; border: 1px solid #d2b48c; background: #fffaf0; }
+.training-chart-heading { display: flex; justify-content: space-between; gap: 8px; color: #29170c; font-size: 12px; }
+.training-chart-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.training-chart-heading span { color: #7d2e1f; font-variant-numeric: tabular-nums; }
+.training-chart svg { display: block; width: 100%; height: auto; margin-top: 6px; }
+.chart-axis { stroke: #d2b48c; stroke-width: 1; }
+.chart-grid { stroke: #eadcc5; stroke-width: 1; }
+.chart-line { fill: none; stroke: #2d5a46; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
+.chart-dot { fill: #7d2e1f; }
+.chart-label { fill: #765e45; font-size: 9px; }
+.training-empty { padding: 28px; border: 1px dashed #b98a58; color: #765e45; text-align: center; }
+
 @media (max-width: 760px) {
   .app-shell {
     padding: 16px;
@@ -580,6 +621,11 @@ button.candidate-row.selected {
   .benchmark-games { padding-left: 12px; }
   .tournament-header, .tournament-actions { align-items: stretch; flex-direction: column; }
   .tournament-layout, .tournament-matches { grid-template-columns: 1fr; }
+  .training-header { align-items: stretch; flex-direction: column; }
+  .training-card-toggle { grid-template-columns: minmax(0, 1fr); }
+  .training-card-summary { justify-content: start; }
+  .training-card-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .training-card-body { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 900px) {
